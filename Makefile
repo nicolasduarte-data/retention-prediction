@@ -1,0 +1,90 @@
+# Makefile — retention-prediction
+#
+# Story 0.6 — Reproducibility goes from "read the README" to "run `make train`".
+# Most public HR repos lack this. Even when most targets are placeholders today,
+# the Makefile documents the surface the project promises by v1.0.
+#
+# Requirements:
+#   - uv (https://docs.astral.sh/uv/) on PATH
+#   - On Windows: `scoop install make` (Git Bash doesn't ship with make)
+#   - On macOS:   `brew install make` if not already present
+#   - On Linux:   make ships with build-essential
+#   - On CI:      ubuntu-latest ships make by default
+
+.PHONY: help install lint test data train evaluate fairness explain report \
+        mlflow-ui repro coverage clean
+
+# Default target — show available commands.
+help:
+	@echo "retention-prediction — Makefile targets"
+	@echo ""
+	@echo "  Setup:"
+	@echo "    install     uv sync — install all deps (works today)"
+	@echo "    clean       remove .pytest_cache, .ruff_cache, .mypy_cache, __pycache__"
+	@echo ""
+	@echo "  Quality gates (work today):"
+	@echo "    lint        uv run pre-commit run --all-files"
+	@echo "    test        uv run pytest with coverage"
+	@echo "    coverage    uv run pytest --cov + open htmlcov/index.html"
+	@echo "    repro       PYTHONHASHSEED=42 uv run pytest (deterministic hash)"
+	@echo ""
+	@echo "  Pipeline (ship as later stories land):"
+	@echo "    data        Epic 1 (Loop 1 — Story 1.1) — BigQuery loader"
+	@echo "    train       Epic 2 (Loop 1+2)            — Model training"
+	@echo "    evaluate    Epic 3 (Loop 1+2)            — Evaluation rigor"
+	@echo "    fairness    Epic 5 (Loop 3a)             — Fairness audit"
+	@echo "    explain     Epic 6 (Loop 3c)             — SHAP / ALE / DiCE"
+	@echo "    report      Epic 8 (Loop 4)              — Publish + writeback"
+	@echo "    mlflow-ui   Epic 2 (Loop 2 — Story 2.7)  — Local MLflow UI"
+
+# --- Setup ---
+
+install:
+	uv sync
+
+clean:
+	rm -rf .pytest_cache .ruff_cache .mypy_cache .coverage coverage.xml htmlcov
+	find . -type d -name __pycache__ -prune -exec rm -rf {} +
+	find . -type d -name '*.egg-info' -prune -exec rm -rf {} +
+
+# --- Quality gates (work today) ---
+
+lint:
+	uv run pre-commit run --all-files --show-diff-on-failure
+
+test:
+	uv run pytest --cov=src --cov-report=term-missing
+
+coverage:
+	uv run pytest --cov=src --cov-report=html
+	@echo ""
+	@echo "Open htmlcov/index.html to view the coverage report."
+
+# Story 2.8 reproducibility smoke test (Loop 2) lives here in full.
+# v0.1 partial: PYTHONHASHSEED is the missing piece set_global_seed() can't deliver
+# at runtime (see src/retention/config.py:set_global_seed docstring).
+repro:
+	PYTHONHASHSEED=42 uv run pytest --cov=src --cov-report=term-missing
+
+# --- Pipeline (placeholders until the relevant story lands) ---
+
+data:
+	@echo "Epic 1 — coming soon (Story 1.1 BigQuery loader)"
+
+train:
+	@echo "Epic 2 — coming soon (Story 2.3 XGBoost training in Loop 1; Story 2.5 full comparison in Loop 2)"
+
+evaluate:
+	@echo "Epic 3 — coming soon (Story 3.1 AUC-PR in Loop 1; Stories 3.2-3.5 calibration/threshold/EV/CV in Loop 2)"
+
+fairness:
+	@echo "Epic 5 — coming soon (Loop 3a — Fairlearn audit + compound attribute + intervention category)"
+
+explain:
+	@echo "Epic 6 — coming soon (Loop 3c — SHAP + ALE + DiCE + EBM intrinsic)"
+
+report:
+	@echo "Epic 8 — coming soon (Loop 4 — README polish + Substack + LinkedIn + Looker Page 5 + writeback)"
+
+mlflow-ui:
+	@echo "Epic 2 — coming soon (Story 2.7 MLflow integration in Loop 2)"
