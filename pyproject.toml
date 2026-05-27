@@ -1,0 +1,71 @@
+[project]
+name = "retention-prediction"
+version = "0.1.0"
+requires-python = ">=3.11"
+dependencies = [
+    "alibi>=0.9",
+    "dice-ml>=0.11",
+    "fairlearn>=0.10",
+    "google-cloud-bigquery>=3.20",
+    "interpret>=0.5",
+    "jupyterlab>=4.0",
+    "lightgbm>=4.0",
+    "llvmlite>=0.42",
+    "matplotlib>=3.8",
+    "mlflow>=2.12",
+    "numba>=0.59",
+    "numpy>=1.24",
+    "pandas>=2.0",
+    "pandas-gbq>=0.22",
+    "plotly>=5.20",
+    "scikit-learn>=1.4",
+    "scikit-survival>=0.22",
+    "seaborn>=0.13",
+    "shap>=0.45",
+    "survshap>=0.4",
+    "xgboost>=2.0",
+]
+
+[dependency-groups]
+dev = [
+    "detect-secrets>=1.5",
+    "mypy>=1.10",
+    "nbmake>=1.5",
+    "nbstripout>=0.7",
+    "pre-commit>=3.7",
+    "pytest>=8.0",
+    "pytest-cov>=4.1",
+    "ruff>=0.4",
+]
+
+# --------------------------------------------------------------------- #
+# Build system — setuptools per BACKLOG.md Stack Decisions               #
+# --------------------------------------------------------------------- #
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+include = ["retention*"]
+
+# --------------------------------------------------------------------- #
+# Tooling configuration (Story 0.3 — pre-commit hooks will reference this)
+# --------------------------------------------------------------------- #
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+extend-exclude = ["notebooks/**"]
+
+[tool.mypy]
+python_version = "3.11"
+strict = true
+ignore_missing_imports = true
+files = ["src", "scripts", "docs", "tests"]
+
+# Tests can be less strict — pytest fixtures and monkeypatch don't carry
+# type annotations on every helper. src/ remains under full strict mode.
+[[tool.mypy.overrides]]
+module = "tests.*"
+disallow_untyped_defs = false
+disallow_incomplete_defs = false

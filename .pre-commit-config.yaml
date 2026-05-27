@@ -1,0 +1,65 @@
+# .pre-commit-config.yaml — retention-prediction (Story 0.3)
+#
+# Hooks run on `git commit`. Verify locally without committing:
+#   uv run pre-commit run --all-files
+# Auto-update hook versions:
+#   uv run pre-commit autoupdate
+#
+# Hook order (deliberate — see Story 0.3.6 What you'll learn):
+#   1. ruff (lint + autofix) — catches most issues before format runs
+#   2. ruff-format            — applies canonical formatting after fixes
+#   3. nbstripout             — strips notebook outputs (Story 0.3.4)
+#   4. notebook-logic-check   — blocks def/class in notebooks (Story 0.3.7)
+#   5. mypy --strict          — full-coverage type check (uses pyproject config)
+#   6. detect-secrets         — secret scanning (Story 0.3.8)
+
+repos:
+  # --- ruff: lint + autofix (must run before ruff-format) ---
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.15.14
+    hooks:
+      - id: ruff
+        args: [--fix, --exit-non-zero-on-fix]
+      - id: ruff-format
+
+  # --- nbstripout: strip notebook outputs on commit (Story 0.3.4) ---
+  - repo: https://github.com/kynan/nbstripout
+    rev: 0.9.1
+    hooks:
+      - id: nbstripout
+
+  # --- notebook-logic-check: block def/class in notebooks (Story 0.3.7 — Risk 10) ---
+  - repo: local
+    hooks:
+      - id: notebook-logic-check
+        name: Block function/class defs in notebooks
+        entry: uv run python scripts/check_notebook_logic.py
+        language: system
+        files: \.ipynb$
+        pass_filenames: true
+
+  # --- mypy strict: uses pyproject [tool.mypy] config (covers src + scripts + docs + tests) ---
+  - repo: local
+    hooks:
+      - id: mypy
+        name: mypy --strict (full coverage)
+        entry: uv run mypy
+        language: system
+        types: [python]
+        # pyproject.toml `files` setting controls coverage; pre-commit's per-file
+        # invocation would fight that, so we ignore the filenames pre-commit passes
+        # and let mypy resolve from config.
+        pass_filenames: false
+        always_run: true
+
+  # --- detect-secrets: prevent committing API keys / SA JSONs / tokens (Story 0.3.8) ---
+  - repo: https://github.com/Yelp/detect-secrets
+    rev: v1.5.0
+    hooks:
+      - id: detect-secrets
+        args: ["--baseline", ".secrets.baseline"]
+        exclude: |
+          (?x)^(
+            uv\.lock|
+            \.secrets\.baseline
+          )$

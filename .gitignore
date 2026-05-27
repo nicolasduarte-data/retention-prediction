@@ -1,0 +1,81 @@
+# .gitignore — retention-prediction
+# Per /feast r02 Tier 1 #2 — MUST exist before `git init` to prevent .venv
+# (~1.5 GB) from getting tracked on first commit.
+
+# --- Python ---
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg-info/
+*.egg
+dist/
+build/
+pip-log.txt
+pip-delete-this-directory.txt
+
+# --- uv / venv ---
+.venv/
+venv/
+env/
+.python-version
+
+# --- Test + linter caches ---
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+.coverage.*
+htmlcov/
+.tox/
+.nox/
+
+# --- Notebooks ---
+.ipynb_checkpoints/
+
+# --- IDE / editors ---
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# --- OS ---
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# --- Environment / secrets — never commit ---
+.env
+.env.local
+.env.*.local
+*.json.key
+*-sa.json
+.gcp/
+service-account*.json
+
+# --- Data — large local files (synthetic data lives in BigQuery) ---
+data/raw/*.csv
+data/raw/*.parquet
+data/processed/*.csv
+data/processed/*.parquet
+!data/raw/.gitkeep
+!data/processed/.gitkeep
+
+# --- Reports — large rendered figures (regenerated from notebooks) ---
+reports/figures/*.png
+reports/figures/*.svg
+reports/figures/*.pdf
+!reports/figures/.gitkeep
+reports/distribution/*.mp4
+reports/distribution/*.mov
+!reports/distribution/.gitkeep
+
+# --- MLflow local store (Story 2.7) ---
+mlruns/
+mlflow.db
+mlartifacts/
+
+# --- Local pre-commit baseline scratch state ---
+.secrets.baseline.tmp
