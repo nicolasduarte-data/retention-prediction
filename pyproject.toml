@@ -1,7 +1,35 @@
 [project]
 name = "retention-prediction"
 version = "0.1.0"
-requires-python = ">=3.11"
+description = "Production-grade behavioral retention prediction for senior People Analytics roles. Reads HRIS features from pa-warehouse (BigQuery), ships dual-cohort comparison + survival arm + fairness audit + interpretability deep-dive against a synthetic 2,500-employee mart."
+readme = "README.md"
+requires-python = ">=3.11,<3.13"
+license = { text = "MIT" }
+authors = [
+    { name = "Nicolas Duarte", email = "ingnicolasduarte@gmail.com" },
+]
+keywords = [
+    "people-analytics",
+    "hr-data-science",
+    "attrition-prediction",
+    "survival-analysis",
+    "fairness",
+    "interpretability",
+    "machine-learning",
+    "bigquery",
+]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "Topic :: Scientific/Engineering :: Information Analysis",
+]
 dependencies = [
     "alibi>=0.9",
     "dice-ml>=0.11",
@@ -25,6 +53,11 @@ dependencies = [
     "survshap>=0.4",
     "xgboost>=2.0",
 ]
+
+[project.urls]
+Repository = "https://github.com/nicolasduarte-data/retention-prediction"
+Issues = "https://github.com/nicolasduarte-data/retention-prediction/issues"
+Documentation = "https://github.com/nicolasduarte-data/retention-prediction#readme"
 
 [dependency-groups]
 dev = [
@@ -69,3 +102,12 @@ files = ["src", "scripts", "docs", "tests"]
 module = "tests.*"
 disallow_untyped_defs = false
 disallow_incomplete_defs = false
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = [
+    "-v",
+    "--strict-markers",
+    "--strict-config",
+    "--tb=short",
+]
