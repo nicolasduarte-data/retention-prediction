@@ -95,7 +95,7 @@ cp .env.example .env
 # Edit .env to set PA_WAREHOUSE_SA_KEY pointing at your GCP service account JSON
 
 # Verify environment
-uv run pytest                                              # 6 behavior tests
+uv run pytest                                              # 74 tests
 uv run pytest --nbmake notebooks/00_environment_check.ipynb # env + BQ auth smoke
 uv run pre-commit run --all-files                          # 6 hooks must pass
 ```
