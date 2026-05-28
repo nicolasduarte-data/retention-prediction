@@ -56,7 +56,7 @@ _SKIP_NO_CREDS = pytest.mark.skipif(
 
 
 def test_load_contract_parses_v_attrition_features() -> None:
-    """`load_contract()` must extract the canonical 10 columns from the live
+    """`load_contract()` must extract the canonical 13 columns from the live
     integration contract file."""
     contract = load_contract()
 
@@ -70,6 +70,9 @@ def test_load_contract_parses_v_attrition_features() -> None:
         "successor_count",
         "age_at_window_close",
         "gender",
+        "enps",
+        "engagement_score",
+        "manager_relationship_score",
         "voluntary_exit_label",
     }
     assert set(contract.keys()) == expected_cols, (

@@ -22,9 +22,10 @@ This module solves three problems simultaneously:
 
 Story 1.2 — see `BACKLOG.md → ## ⚠️ Risk Register` rows 2 + 3.
 
-**v0.1 cohort note**: every spec has `cohort='both'` because the mart
-currently has zero survey columns. Loop 2 adds survey features when
-paw-prey-NNN delivers them — see `BACKLOG.md → ## Preconditions`.
+**v0.2 cohort note**: paw-prey-006 delivered 3 survey signal columns
+(enps, engagement_score, manager_relationship_score). These are marked
+`cohort='hybrid_only'` — they only appear in the Loop 2 hybrid cohort.
+HRIS-only features retain `cohort='both'`.
 """
 
 from __future__ import annotations
@@ -109,10 +110,10 @@ class FeatureSpec:
 
 
 # --------------------------------------------------------------------- #
-# Canonical catalog (10 columns matching docs/integration_contract.md)   #
+# Canonical catalog (13 columns matching docs/integration_contract.md)   #
 # --------------------------------------------------------------------- #
 #
-# Source: pa-warehouse `marts.v_attrition_features` v0.1 (10 columns).
+# Source: pa-warehouse `marts.v_attrition_features` v0.2 (13 columns).
 # Update this catalog whenever the integration contract is regenerated.
 # `test_catalog_covers_all_contract_columns` enforces parity.
 
@@ -275,6 +276,59 @@ FEATURE_CATALOG: tuple[FeatureSpec, ...] = (
             "is exposed in v_attrition_features). Precedes all label events."
         ),
         description="Self-reported gender category (synthetic).",
+    ),
+    # ---- Survey signal features (hybrid cohort only — paw-prey-006) ----
+    FeatureSpec(
+        name="enps",
+        role="feature",
+        dtype="numeric",
+        source="survey",
+        mutable=True,  # eNPS reflects sentiment that can shift with intervention.
+        protected=False,
+        cohort="hybrid_only",
+        snapshot_date_offset_months=3,  # Surveys run quarterly.
+        leakage_audited=True,
+        leakage_rationale=(
+            "Aggregated in pa-warehouse dbt/models/marts/v_attrition_features.sql "
+            "survey_signals CTE with gate `survey_date <= snapshot_date`. Only "
+            "responses recorded before the observation anchor are included; the "
+            "mart enforces the temporal constraint at source."
+        ),
+        description="Employee Net Promoter Score at snapshot date (integer, typically -100 to 100).",
+    ),
+    FeatureSpec(
+        name="engagement_score",
+        role="feature",
+        dtype="numeric",
+        source="survey",
+        mutable=True,  # Engagement can improve through manager actions / interventions.
+        protected=False,
+        cohort="hybrid_only",
+        snapshot_date_offset_months=3,  # Surveys run quarterly.
+        leakage_audited=True,
+        leakage_rationale=(
+            "Aggregated in pa-warehouse dbt/models/marts/v_attrition_features.sql "
+            "survey_signals CTE with gate `survey_date <= snapshot_date`. Only "
+            "responses recorded before the observation anchor are included."
+        ),
+        description="Mean engagement score from pulse surveys at snapshot date (float, 1.0–5.0 scale).",
+    ),
+    FeatureSpec(
+        name="manager_relationship_score",
+        role="feature",
+        dtype="numeric",
+        source="survey",
+        mutable=True,  # Manager relationship is a primary retention lever.
+        protected=False,
+        cohort="hybrid_only",
+        snapshot_date_offset_months=3,  # Surveys run quarterly.
+        leakage_audited=True,
+        leakage_rationale=(
+            "Aggregated in pa-warehouse dbt/models/marts/v_attrition_features.sql "
+            "survey_signals CTE with gate `survey_date <= snapshot_date`. Only "
+            "responses recorded before the observation anchor are included."
+        ),
+        description="Mean manager relationship score from pulse surveys at snapshot date (float, 1.0–5.0 scale).",
     ),
     # ---- Label ----
     FeatureSpec(
