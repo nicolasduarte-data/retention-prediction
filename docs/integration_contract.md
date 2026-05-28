@@ -1,8 +1,8 @@
 # Integration Contract — `marts.v_attrition_features`
 
-Schema dumped from `pa-warehouse-prod.marts.v_attrition_features` at **2026-05-27 12:49 UTC** via BigQuery `INFORMATION_SCHEMA` (`docs/_schema_dump.py`). Ground-truth contract for the retention-prediction loader (Story 1.1.8).
+Schema dumped from `pa-warehouse-prod.marts.v_attrition_features` at **2026-05-28 18:08 UTC** via BigQuery `INFORMATION_SCHEMA` (`docs/_schema_dump.py`). Ground-truth contract for the retention-prediction loader (Story 1.1.8).
 
-**Row count in schema dump:** 10 columns
+**Row count in schema dump:** 13 columns
 
 | # | column_name | data_type | is_nullable |
 |---|-------------|-----------|-------------|
@@ -15,7 +15,10 @@ Schema dumped from `pa-warehouse-prod.marts.v_attrition_features` at **2026-05-2
 | 7 | `successor_count` | `INT64` | YES |
 | 8 | `age_at_window_close` | `INT64` | YES |
 | 9 | `gender` | `STRING` | YES |
-| 10 | `voluntary_exit_label` | `BOOL` | YES |
+| 10 | `enps` | `INT64` | YES |
+| 11 | `engagement_score` | `FLOAT64` | YES |
+| 12 | `manager_relationship_score` | `FLOAT64` | YES |
+| 13 | `voluntary_exit_label` | `BOOL` | YES |
 
 ---
 
