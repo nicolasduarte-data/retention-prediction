@@ -1,8 +1,9 @@
-"""XGBoost retention model wrapper — Story 2.3.
+"""XGBoost retention model wrapper — Story 2.3 (cohort-aware update — Loop 2).
 
 Thin wrapper around XGBClassifier that:
   - Wires eval_metric='aucpr' so training monitors AUC-PR directly.
   - Accepts (X_train, y_train, X_val, y_val) to enable eval_set monitoring.
+  - Accepts cohort='hris_only' | 'hybrid' to select the right preprocessor.
   - Exposes `predict_proba` for the evaluation layer.
   - Holds the fitted preprocessor + classifier so the notebook can pass raw
     DataFrames without manual transform calls.
@@ -14,7 +15,7 @@ verifies AUC-PR is better than random on synthetic data.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Literal
 
 import numpy as np
 from sklearn.pipeline import Pipeline
@@ -47,6 +48,7 @@ class RetentionModel:
     def __init__(
         self,
         *,
+        cohort: Literal["hris_only", "hybrid"] = "hybrid",
         n_estimators: int = 100,
         max_depth: int = 4,
         learning_rate: float = 0.05,
@@ -56,6 +58,7 @@ class RetentionModel:
         random_state: int = config.SEED,
         verbosity: int = 0,
     ) -> None:
+        self._cohort = cohort
         self._xgb_params: dict[str, object] = dict(
             n_estimators=n_estimators,
             max_depth=max_depth,
@@ -96,7 +99,7 @@ class RetentionModel:
         Returns:
             self (fluent interface).
         """
-        preprocessor = build_preprocessor()
+        preprocessor = build_preprocessor(cohort=self._cohort)
         X_train_t = preprocessor.fit_transform(X_train)
         y_train_arr = y_train.to_numpy()
 
