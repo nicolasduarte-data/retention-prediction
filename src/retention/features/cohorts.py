@@ -161,7 +161,50 @@ def get_cohort_feature_names(cohort: str) -> list[str]:
     ]
 
 
+def extract_X_y(
+    df: pd.DataFrame,
+    cohort: str,
+    *,
+    label_col: str = "voluntary_exit_label",
+) -> tuple[pd.DataFrame, pd.Series]:
+    """Extract feature matrix X and label series y from a cohort DataFrame.
+
+    Convenience function for notebooks and scripts: avoids repeating the
+    get_cohort_feature_names() + column selection + label cast pattern.
+    Defined here (not in the notebook) so mypy and pytest can verify it.
+
+    Args:
+        df: A cohort DataFrame — typically from split_cohorts()[cohort]
+            or a temporal split of one. Must contain all cohort feature
+            columns and the label column.
+        cohort: 'hris_only' or 'hybrid'. Controls which feature columns
+            are selected from df.
+        label_col: Name of the binary label column. Default matches the
+            catalog's label column name.
+
+    Returns:
+        (X, y) tuple:
+            X — pd.DataFrame of shape (n, n_features) with feature columns only.
+            y — pd.Series of int (0/1) with name=label_col.
+
+    Raises:
+        KeyError: if df is missing a required feature or label column.
+
+    Example::
+
+        train_cohorts = split_cohorts(train_df)
+        X_tr, y_tr = extract_X_y(train_cohorts['hybrid'], 'hybrid')
+        pipeline = train_lr(X_tr, y_tr, cohort='hybrid')
+    """
+    feature_cols = get_cohort_feature_names(cohort)
+    X = df[feature_cols]
+    y = df[label_col].astype(int)
+    y.name = label_col
+    return X, y
+
+
 __all__ = [
     "split_cohorts",
     "get_cohort_feature_names",
+    "extract_X_y",
 ]

@@ -1,4 +1,4 @@
-"""Evaluation metrics — Story 3.1.
+"""Evaluation metrics — Story 3.1 (extended in Story 2.5 for comparison table).
 
 AUC-PR (Area Under the Precision-Recall Curve) is the primary metric for
 the retention model throughout all loops. Why not AUC-ROC?
@@ -12,13 +12,17 @@ the retention model throughout all loops. Why not AUC-ROC?
 - The Rung 1 caption is a deliberate epistemic flag — the model is
   associational, not causal. It tells an HR analyst what the prediction IS
   and what it ISN'T, keeping the model card honest from day one.
+
+**Story 2.5 additions:** `auc_roc`, `precision_at_k`, `recall_at_k`, `brier_score`
+are added here to power the 6-cell comparison table (LR/GBM/EBM × hris_only/hybrid).
+These will be further wrapped by calibration, threshold, and EV logic in Epic 3.
 """
 
 from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from sklearn.metrics import average_precision_score
+from sklearn.metrics import average_precision_score, brier_score_loss, roc_auc_score
 
 if TYPE_CHECKING:
     import numpy as np
@@ -63,6 +67,150 @@ def auc_pr(
         raise ValueError("y_proba contains NaN values. Check model output.")
 
     return float(average_precision_score(y_true, proba))
+
+
+def auc_roc(
+    y_true: pd.Series | np.ndarray,  # type: ignore[type-arg]
+    y_proba: np.ndarray,  # type: ignore[type-arg]
+) -> float:
+    """Compute AUC-ROC (Area Under the Receiver Operating Characteristic Curve).
+
+    Reported alongside AUC-PR for completeness — but AUC-PR is the primary
+    metric because AUC-ROC is optimistic under class imbalance. A model that
+    predicts the majority class well can still achieve a high AUC-ROC even if
+    it rarely identifies exits. AUC-PR forces the model to rank exits well.
+
+    Args:
+        y_true: Binary ground-truth labels (0/1 or bool).
+        y_proba: Predicted probabilities for the positive class.
+            Shape (n_samples,) or (n_samples, 2) — col 1 if 2D.
+
+    Returns:
+        Float in [0.5, 1.0] for a useful model. 0.5 = random, 1.0 = perfect.
+    """
+    import numpy as np  # noqa: PLC0415
+
+    proba = np.asarray(y_proba)
+    if proba.ndim == 2:
+        proba = proba[:, 1]
+    return float(roc_auc_score(y_true, proba))
+
+
+def precision_at_k(
+    y_true: pd.Series | np.ndarray,  # type: ignore[type-arg]
+    y_proba: np.ndarray,  # type: ignore[type-arg]
+    k: float = 0.10,
+) -> float:
+    """Precision in the top-k fraction of employees ranked by predicted exit risk.
+
+    The operational HR question: "If we flag the top k% highest-risk employees
+    for a retention conversation, what fraction of those are genuine exit risks?"
+    This is the metric HR managers care about — it controls wasted interventions.
+
+    Args:
+        y_true: Binary ground-truth labels (0/1 or bool).
+        y_proba: Predicted probabilities for the positive class.
+            Shape (n_samples,) or (n_samples, 2).
+        k: Fraction of the population to flag (0.10 = top 10%).
+
+    Returns:
+        Precision in the top-k bucket. 0.0 = all flagged employees are false
+        positives; 1.0 = all flagged employees actually exit.
+
+    Raises:
+        ValueError: if k is not in (0, 1].
+    """
+    import numpy as np  # noqa: PLC0415
+
+    if not 0 < k <= 1:
+        raise ValueError(f"k must be in (0, 1], got {k}.")
+
+    proba = np.asarray(y_proba)
+    if proba.ndim == 2:
+        proba = proba[:, 1]
+
+    y_arr = np.asarray(y_true)
+    n = len(proba)
+    n_top = max(1, int(np.ceil(n * k)))
+
+    # Descending sort by predicted probability, take top n_top
+    top_indices = np.argsort(proba)[::-1][:n_top]
+    return float(y_arr[top_indices].mean())
+
+
+def recall_at_k(
+    y_true: pd.Series | np.ndarray,  # type: ignore[type-arg]
+    y_proba: np.ndarray,  # type: ignore[type-arg]
+    k: float = 0.10,
+) -> float:
+    """Recall in the top-k fraction of employees ranked by predicted exit risk.
+
+    The operational HR question: "Of all employees who will actually exit, what
+    fraction are captured in our top-k flag list?" This controls missed exits
+    (the FLIP-RISK: intervening with no-one who would have left).
+
+    Args:
+        y_true: Binary ground-truth labels (0/1 or bool).
+        y_proba: Predicted probabilities for the positive class.
+            Shape (n_samples,) or (n_samples, 2).
+        k: Fraction of the population to flag (0.10 = top 10%).
+
+    Returns:
+        Recall in the top-k bucket. 0.0 = no real exits flagged; 1.0 = all
+        real exits captured in the top-k slice. Returns 0.0 if no positives
+        in y_true (degenerate label set).
+    """
+    import numpy as np  # noqa: PLC0415
+
+    if not 0 < k <= 1:
+        raise ValueError(f"k must be in (0, 1], got {k}.")
+
+    proba = np.asarray(y_proba)
+    if proba.ndim == 2:
+        proba = proba[:, 1]
+
+    y_arr = np.asarray(y_true)
+    total_positives = y_arr.sum()
+    if total_positives == 0:
+        return 0.0
+
+    n = len(proba)
+    n_top = max(1, int(np.ceil(n * k)))
+    top_indices = np.argsort(proba)[::-1][:n_top]
+    positives_captured = y_arr[top_indices].sum()
+    return float(positives_captured / total_positives)
+
+
+def brier_score(
+    y_true: pd.Series | np.ndarray,  # type: ignore[type-arg]
+    y_proba: np.ndarray,  # type: ignore[type-arg]
+) -> float:
+    """Compute the Brier score (mean squared error of predicted probabilities).
+
+    A calibration-aware metric that penalises confident wrong predictions more
+    than uncertain wrong predictions. Lower is better:
+      - Perfect calibration + prediction: 0.0
+      - Random (P(exit) = base rate): ~base_rate * (1 - base_rate)
+      - Constant P=0: base_rate (predicts no one exits)
+      - Constant P=1: 1 - base_rate (predicts everyone exits)
+
+    At 18.8% base rate, random baseline Brier ≈ 0.153. A model with Brier
+    above 0.153 is worse than predicting the base rate for everyone.
+
+    Args:
+        y_true: Binary ground-truth labels (0/1 or bool).
+        y_proba: Predicted probabilities for the positive class.
+            Shape (n_samples,) or (n_samples, 2).
+
+    Returns:
+        Float in [0, 1]. Lower = better calibration + discrimination.
+    """
+    import numpy as np  # noqa: PLC0415
+
+    proba = np.asarray(y_proba)
+    if proba.ndim == 2:
+        proba = proba[:, 1]
+    return float(brier_score_loss(y_true, proba))
 
 
 def format_rung1_caption(value: float) -> str:
