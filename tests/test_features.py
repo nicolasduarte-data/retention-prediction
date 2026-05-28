@@ -1,6 +1,6 @@
-"""Story 1.2.4 + 1.5.5 Layer 1 — Tests for FEATURE_CATALOG.
+"""Story 1.2.4 + 1.5.5 Layer 1 + 1.3 — Tests for FEATURE_CATALOG and cohort splitting.
 
-Three responsibilities:
+Four responsibilities:
 
 1. **Catalog coverage** — every column in `docs/integration_contract.md` must
    have a `FeatureSpec`. Catches drift between the live mart contract and
@@ -14,9 +14,17 @@ Three responsibilities:
    `_core.yml` metadata. Generic rationales like "looks safe" are rejected.
    This forces the catalog author to be specific, which is what makes the
    audit defensible to a reviewer.
+
+4. **Cohort splitting (Story 1.3)** — `split_cohorts()` returns two DataFrames
+   with identical row indices. The ONLY difference is which feature columns are
+   present. This is the apples-to-apples requirement for the Loop 2 controlled
+   experiment.
 """
 
 from __future__ import annotations
+
+import numpy as np
+import pandas as pd
 
 from retention.data.contract import load_contract
 from retention.features.catalog import (
@@ -193,4 +201,148 @@ def test_leakage_rationales_non_trivial_length() -> None:
     assert not too_short, (
         f"Some leakage_rationales are too short (< 40 chars): {too_short}. "
         f"Expand to explain WHY the feature precedes the label."
+    )
+
+
+# --------------------------------------------------------------------- #
+# Cohort splitting (Story 1.3)                                           #
+# --------------------------------------------------------------------- #
+
+
+def _make_full_df(n: int = 10) -> pd.DataFrame:
+    """Minimal fixture with all 13 contract columns for cohort-split tests.
+
+    Uses deterministic values so tests are reproducible across machines.
+    Survey columns include NaN rows to simulate the 8.2% non-response rate.
+    """
+    rng = np.random.default_rng(42)
+    df = pd.DataFrame(
+        {
+            "employee_id": [f"EMP_{i:03d}" for i in range(n)],
+            "snapshot_date": pd.to_datetime(["2025-05-27"] * n),
+            "tenure_months": rng.uniform(1, 60, n),
+            "compa_ratio": rng.uniform(0.7, 1.3, n),
+            "successor_count": rng.integers(0, 4, n).astype(float),
+            "age_at_window_close": rng.uniform(22, 60, n),
+            "performance_tier": rng.choice(["2", "3", "4", "5"], n),
+            "gender": rng.choice(["M", "F", "NB"], n),
+            "is_critical_role": rng.choice([True, False], n),
+            "enps": rng.uniform(-100, 100, n),
+            "engagement_score": rng.uniform(1, 5, n),
+            "manager_relationship_score": rng.uniform(1, 5, n),
+            "voluntary_exit_label": rng.choice([True, False], n),
+        }
+    )
+    # Simulate ~20% non-response (NaN survey values)
+    nan_mask = rng.random(n) < 0.2
+    df.loc[nan_mask, ["enps", "engagement_score", "manager_relationship_score"]] = np.nan
+    return df
+
+
+def test_cohort_row_alignment() -> None:
+    """Story 1.3 core requirement — identical row indices across cohorts.
+
+    This is the apples-to-apples invariant: same employees, same labels,
+    same temporal split boundaries in both arms. Any deviation means the
+    model comparison is contaminated by population differences.
+    """
+    from retention.features.cohorts import split_cohorts
+
+    df = _make_full_df(n=50)
+    cohorts = split_cohorts(df)
+
+    assert set(cohorts.keys()) == {"hris_only", "hybrid"}, (
+        "split_cohorts must return exactly {'hris_only', 'hybrid'}"
+    )
+    assert cohorts["hris_only"].index.equals(cohorts["hybrid"].index), (
+        "Row indices must be identical between hris_only and hybrid cohorts. "
+        "Violation means model comparison is comparing different populations."
+    )
+
+
+def test_hris_cohort_excludes_survey_columns() -> None:
+    """HRIS-only cohort must not contain survey signal columns."""
+    from retention.features.cohorts import split_cohorts
+
+    df = _make_full_df(n=20)
+    cohorts = split_cohorts(df)
+
+    survey_cols = {"enps", "engagement_score", "manager_relationship_score"}
+    hris_cols = set(cohorts["hris_only"].columns)
+    assert hris_cols.isdisjoint(survey_cols), (
+        f"hris_only cohort contains survey columns: {hris_cols & survey_cols}. "
+        "Survey signal must be absent for the HRIS-only arm."
+    )
+
+
+def test_hybrid_cohort_includes_survey_columns() -> None:
+    """Hybrid cohort must include all three survey signal columns."""
+    from retention.features.cohorts import split_cohorts
+
+    df = _make_full_df(n=20)
+    cohorts = split_cohorts(df)
+
+    survey_cols = {"enps", "engagement_score", "manager_relationship_score"}
+    hybrid_cols = set(cohorts["hybrid"].columns)
+    assert survey_cols.issubset(hybrid_cols), (
+        f"hybrid cohort is missing survey columns: {survey_cols - hybrid_cols}."
+    )
+
+
+def test_both_cohorts_preserve_row_count() -> None:
+    """Neither cohort should gain or lose rows relative to the input."""
+    from retention.features.cohorts import split_cohorts
+
+    n = 30
+    df = _make_full_df(n=n)
+    cohorts = split_cohorts(df)
+
+    assert len(cohorts["hris_only"]) == n, (
+        f"hris_only row count changed: expected {n}, got {len(cohorts['hris_only'])}"
+    )
+    assert len(cohorts["hybrid"]) == n, (
+        f"hybrid row count changed: expected {n}, got {len(cohorts['hybrid'])}"
+    )
+
+
+def test_both_cohorts_contain_label_column() -> None:
+    """The label column must survive the cohort split — it's the y target."""
+    from retention.features.cohorts import split_cohorts
+
+    df = _make_full_df(n=10)
+    cohorts = split_cohorts(df)
+
+    assert "voluntary_exit_label" in cohorts["hris_only"].columns
+    assert "voluntary_exit_label" in cohorts["hybrid"].columns
+
+
+def test_invalid_cohort_raises_valueerror() -> None:
+    """Passing an unknown cohort name to get_cohort_feature_names raises."""
+    import pytest
+
+    from retention.features.cohorts import get_cohort_feature_names
+
+    with pytest.raises(ValueError, match="cohort must be"):
+        get_cohort_feature_names("invalid_cohort")
+
+
+def test_get_cohort_feature_names_hris_only_excludes_survey() -> None:
+    """get_cohort_feature_names('hris_only') must not return survey columns."""
+    from retention.features.cohorts import get_cohort_feature_names
+
+    hris_features = get_cohort_feature_names("hris_only")
+    survey_cols = {"enps", "engagement_score", "manager_relationship_score"}
+    assert set(hris_features).isdisjoint(survey_cols), (
+        f"hris_only feature names contain survey columns: {set(hris_features) & survey_cols}"
+    )
+
+
+def test_get_cohort_feature_names_hybrid_includes_survey() -> None:
+    """get_cohort_feature_names('hybrid') must include all survey columns."""
+    from retention.features.cohorts import get_cohort_feature_names
+
+    hybrid_features = get_cohort_feature_names("hybrid")
+    survey_cols = {"enps", "engagement_score", "manager_relationship_score"}
+    assert survey_cols.issubset(set(hybrid_features)), (
+        f"hybrid feature names missing survey columns: {survey_cols - set(hybrid_features)}"
     )
