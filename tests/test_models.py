@@ -20,6 +20,7 @@ import pandas as pd
 import pytest
 from sklearn.pipeline import Pipeline
 
+from retention.models.ebm import train_ebm
 from retention.models.lr import train_lr
 from retention.models.xgb import RetentionModel
 
@@ -236,8 +237,99 @@ def test_no_smote_in_pipeline(
 
 
 # ------------------------------------------------------------------ #
-# Story 2.6.4 — EBM (placeholder — added in Story 2.4)                 #
+# Story 2.6.4 — EBM wrapper (train_ebm)                                #
 # ------------------------------------------------------------------ #
-# test_ebm_fits will be added here when src/retention/models/ebm.py
-# is written in Story 2.4. Keeping this comment so the test count
-# doesn't drift from the ticket win conditions.
+
+
+def test_ebm_fits(
+    tiny_data: tuple[pd.DataFrame, pd.Series],
+) -> None:
+    """train_ebm() must return a fitted Pipeline without raising."""
+    X, y = tiny_data
+    pipeline = train_ebm(X, y)
+    assert isinstance(pipeline, Pipeline), "train_ebm must return an sklearn Pipeline"
+
+
+def test_ebm_pipeline_has_preprocessor_and_classifier(
+    tiny_data: tuple[pd.DataFrame, pd.Series],
+) -> None:
+    """EBM pipeline must have exactly two named steps: preprocessor + classifier."""
+    X, y = tiny_data
+    pipeline = train_ebm(X, y)
+    step_names = [name for name, _ in pipeline.steps]
+    assert step_names == ["preprocessor", "classifier"], (
+        f"Expected ['preprocessor', 'classifier'], got {step_names}"
+    )
+
+
+def test_ebm_predict_proba_shape(
+    tiny_data: tuple[pd.DataFrame, pd.Series],
+) -> None:
+    """EBM predict_proba(X) must return shape (n_samples, 2)."""
+    X, y = tiny_data
+    pipeline = train_ebm(X, y)
+    proba = pipeline.predict_proba(X)
+    assert proba.shape == (len(X), 2), f"Expected ({len(X)}, 2), got {proba.shape}"
+
+
+def test_ebm_predict_proba_values_in_unit_interval(
+    tiny_data: tuple[pd.DataFrame, pd.Series],
+) -> None:
+    """All EBM probabilities must be in [0, 1]."""
+    X, y = tiny_data
+    pipeline = train_ebm(X, y)
+    proba = pipeline.predict_proba(X)
+    assert (proba >= 0.0).all(), "Negative probability encountered."
+    assert (proba <= 1.0).all(), "Probability > 1 encountered."
+
+
+def test_ebm_row_probabilities_sum_to_one(
+    tiny_data: tuple[pd.DataFrame, pd.Series],
+) -> None:
+    """Each row's EBM probabilities must sum to 1.0 within floating-point tolerance."""
+    X, y = tiny_data
+    pipeline = train_ebm(X, y)
+    proba = pipeline.predict_proba(X)
+    np.testing.assert_allclose(proba.sum(axis=1), 1.0, atol=1e-6)
+
+
+def test_ebm_preprocessor_uses_no_ohe(
+    tiny_data: tuple[pd.DataFrame, pd.Series],
+) -> None:
+    """EBM preprocessor must not contain OneHotEncoder — EBM handles categoricals natively.
+
+    This is the key architectural distinction between the EBM and LR/GBM models.
+    If OHE is accidentally added to the EBM pipeline (e.g. by reusing
+    build_preprocessor() instead of build_ebm_preprocessor()), EBM would treat
+    each one-hot column as an independent binary feature rather than a level of
+    the original categorical. This destroys the native categorical advantage.
+    """
+    from sklearn.preprocessing import OneHotEncoder
+
+    X, y = tiny_data
+    pipeline = train_ebm(X, y)
+    preprocessor = pipeline.named_steps["preprocessor"]
+
+    for _name, transformer, _cols in preprocessor.transformers_:
+        # Walk into nested Pipelines (e.g. the boolean step)
+        steps_to_check = (
+            [("inner", transformer)] if not hasattr(transformer, "steps") else transformer.steps
+        )
+        for _step_name, step_obj in steps_to_check:
+            assert not isinstance(step_obj, OneHotEncoder), (
+                "EBM preprocessor step contains OneHotEncoder. "
+                "Use build_ebm_preprocessor() (no OHE) — not build_preprocessor() — "
+                "so EBM can handle categoricals natively."
+            )
+
+
+def test_ebm_hris_only_cohort(
+    tiny_data: tuple[pd.DataFrame, pd.Series],
+    hris_cols: list[str],
+) -> None:
+    """train_ebm with cohort='hris_only' must fit on a 10-column DataFrame without KeyError."""
+    X_full, y = tiny_data
+    X_hris = X_full[hris_cols]
+    pipeline = train_ebm(X_hris, y, cohort="hris_only")
+    proba = pipeline.predict_proba(X_hris)
+    assert proba.shape == (len(X_hris), 2)

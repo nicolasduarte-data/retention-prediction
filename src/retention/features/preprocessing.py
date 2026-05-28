@@ -169,6 +169,110 @@ def get_feature_columns(
     ]
 
 
+def build_ebm_preprocessor(
+    cohort: Literal["hris_only", "hybrid"] = "hybrid",
+) -> ColumnTransformer:
+    """Return an imputation-only ColumnTransformer for EBM — no OHE, no scaling.
+
+    EBM (ExplainableBoostingClassifier) handles categorical features natively
+    by bucketing string values into bins internally. Applying OHE before EBM
+    destroys that advantage — EBM would then see one-hot columns and treat each
+    value as an independent binary feature rather than a level of the same
+    categorical. This preprocessor intentionally omits OHE so EBM can use its
+    native GAM + interaction handling on raw category levels.
+
+    It also omits StandardScaler. EBM is a tree-based learner (boosted GAMs),
+    not a gradient-descent method, so it is invariant to monotone feature
+    transforms. Scaling would change nothing about the model output.
+
+    Column routing (EBM-specific):
+      numeric     → SimpleImputer(median)              [fills NaN; no scaling]
+      categorical → SimpleImputer(constant='__miss__') [preserves string dtype]
+      boolean     → FunctionTransformer(cast to float) [0.0 / 1.0]
+      others      → dropped (remainder='drop')
+
+    set_output(transform='pandas'):
+        Returns a DataFrame (not ndarray) so EBM auto-detects feature types
+        from column dtypes — float64 → 'continuous', object → 'nominal'.
+        Column names are preserved for SHAP + EBM global explanation.
+
+    Cross-model OHE tradeoff (acknowledged, not hidden):
+        LR and GBM share build_preprocessor() which OHE-encodes categoricals.
+        EBM uses this function and skips OHE. The comparison table (Story 2.5)
+        therefore compares:
+          LR/GBM: OHE → each category level is a feature coefficient
+          EBM:    native → each category level is a bin in the GAM term
+        This is documented in docs/methodology.md → Cross-Model Comparison.
+
+    Args:
+        cohort: 'hybrid' (default, 13 features) or 'hris_only' (10 features).
+
+    Returns:
+        Unfitted ColumnTransformer with set_output('pandas') active.
+        Call `.fit_transform(X_train)` then `.transform(X_val/X_test)`.
+    """
+    cohort_features = set(get_cohort_feature_names(cohort))
+
+    numeric_cols = [
+        s.name
+        for s in FEATURE_CATALOG
+        if s.role == "feature" and s.dtype == "numeric" and s.name in cohort_features
+    ]
+    categorical_cols = [
+        s.name
+        for s in FEATURE_CATALOG
+        if s.role == "feature" and s.dtype == "categorical" and s.name in cohort_features
+    ]
+    boolean_cols = [
+        s.name
+        for s in FEATURE_CATALOG
+        if s.role == "feature" and s.dtype == "boolean" and s.name in cohort_features
+    ]
+
+    transformers = []
+    if numeric_cols:
+        transformers.append(("numeric", SimpleImputer(strategy="median"), numeric_cols))
+    if categorical_cols:
+        # No OHE — preserve string dtype so EBM handles the column as nominal.
+        transformers.append(
+            (
+                "categorical",
+                SimpleImputer(strategy="constant", fill_value="__missing__"),
+                categorical_cols,
+            )
+        )
+    if boolean_cols:
+        transformers.append(
+            (
+                "boolean",
+                Pipeline(
+                    steps=[
+                        (
+                            "cast",
+                            FunctionTransformer(
+                                _cast_bool_to_float,
+                                validate=False,
+                                feature_names_out="one-to-one",
+                            ),
+                        )
+                    ]
+                ),
+                boolean_cols,
+            )
+        )
+
+    ct = ColumnTransformer(
+        transformers=transformers,
+        remainder="drop",
+        verbose_feature_names_out=False,
+    )
+    # set_output("pandas") makes transform() return a DataFrame so EBM
+    # auto-detects feature types from column dtypes (float64 → continuous,
+    # object → nominal). Required for native categorical handling to work.
+    ct.set_output(transform="pandas")
+    return ct
+
+
 def get_feature_names_out(preprocessor: ColumnTransformer) -> list[str]:
     """Return output feature names after fitting.
 
