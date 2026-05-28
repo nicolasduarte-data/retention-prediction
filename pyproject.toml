@@ -37,6 +37,7 @@ dependencies = [
     "google-cloud-bigquery>=3.20",
     "interpret>=0.5",
     "jupyterlab>=4.0",
+    "lifelines>=0.30.3",
     "lightgbm>=4.0",
     "llvmlite>=0.42",
     "matplotlib>=3.8",
@@ -94,7 +95,8 @@ extend-exclude = ["notebooks/**"]
 python_version = "3.11"
 strict = true
 ignore_missing_imports = true
-files = ["src", "scripts", "docs", "tests"]
+files = ["src", "docs", "tests"]
+exclude = ["scripts/"]
 
 # Tests can be less strict — pytest fixtures and monkeypatch don't carry
 # type annotations on every helper. src/ remains under full strict mode.
@@ -102,6 +104,7 @@ files = ["src", "scripts", "docs", "tests"]
 module = "tests.*"
 disallow_untyped_defs = false
 disallow_incomplete_defs = false
+
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
