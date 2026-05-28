@@ -49,7 +49,6 @@ cells = [
         "from __future__ import annotations\n"
         "\n"
         "import warnings\n"
-        "from pathlib import Path\n"
         "\n"
         "import pandas as pd\n"
         "\n"
@@ -76,7 +75,9 @@ cells = [
     ),
     md("## 2 — Data Loading & Temporal Split"),
     code(
-        "df = load_attrition_features(snapshot_dir=Path('data/raw'))\n"
+        "# config.DATA_DIR resolves from the package location (absolute), so the\n"
+        "# load works regardless of cwd — nbconvert runs with cwd=notebooks/.\n"
+        "df = load_attrition_features(snapshot_dir=config.DATA_DIR / 'raw')\n"
         "print(f'Loaded {len(df):,} rows × {df.shape[1]} cols')\n"
         "\n"
         "train_df, val_df, test_df = temporal_split(df)\n"
@@ -182,7 +183,8 @@ cells = [
         "            f'{h:.3f}', ha='center', va='bottom', fontsize=8)\n"
         "plt.xticks(rotation=30, ha='right')\n"
         "plt.tight_layout()\n"
-        "plt.savefig('../reports/figures/loop2_comparison_auc_pr.png', dpi=150, bbox_inches='tight')\n"
+        "fig_path = config.REPORTS_DIR / 'figures' / 'loop2_comparison_auc_pr.png'\n"
+        "plt.savefig(fig_path, dpi=150, bbox_inches='tight')\n"
         "plt.show()\n"
         "print('Saved: reports/figures/loop2_comparison_auc_pr.png')"
     ),
