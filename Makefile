@@ -72,7 +72,11 @@ data:
 	@echo "Epic 1 — coming soon (Story 1.1 BigQuery loader)"
 
 train:
-	@echo "Epic 2 — coming soon (Story 2.3 XGBoost training in Loop 1; Story 2.5 full comparison in Loop 2)"
+	uv run python scripts/generate_comparison_notebook.py
+	uv run jupyter nbconvert --to notebook --execute --inplace notebooks/02_model_comparison.ipynb
+	@echo ""
+	@echo "Training complete. mlruns/ populated with 6 runs (LR/GBM/EBM × hris_only/hybrid)."
+	@echo "Run 'make mlflow-ui' to open the comparison view."
 
 evaluate:
 	@echo "Epic 3 — coming soon (Story 3.1 AUC-PR in Loop 1; Stories 3.2-3.5 calibration/threshold/EV/CV in Loop 2)"
@@ -87,4 +91,4 @@ report:
 	@echo "Epic 8 — coming soon (Loop 4 — README polish + Substack + LinkedIn + Looker Page 5 + writeback)"
 
 mlflow-ui:
-	@echo "Epic 2 — coming soon (Story 2.7 MLflow integration in Loop 2)"
+	uv run mlflow ui --backend-store-uri mlruns

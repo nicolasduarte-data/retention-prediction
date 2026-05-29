@@ -95,7 +95,7 @@ cp .env.example .env
 # Edit .env to set PA_WAREHOUSE_SA_KEY pointing at your GCP service account JSON
 
 # Verify environment
-uv run pytest                                              # 74 tests
+uv run pytest                                              # 118 tests
 uv run pytest --nbmake notebooks/00_environment_check.ipynb # env + BQ auth smoke
 uv run pre-commit run --all-files                          # 6 hooks must pass
 ```
@@ -106,6 +106,29 @@ PYTHONHASHSEED=42 uv run pytest
 ```
 
 See `.env.example` for the full env-var contract.
+
+### Reproducing the MLflow experiment view
+
+The `mlruns/` tracking store is gitignored — it's regenerated locally.
+Three steps to reproduce the UI from a fresh clone:
+
+```bash
+# Step 1 — install
+make install          # uv sync
+
+# Step 2 — train (populates mlruns/ with 6 runs: LR/GBM/EBM × hris_only/hybrid)
+make train
+
+# Step 3 — open the UI
+make mlflow-ui        # opens localhost:5000 — sort by auc_pr column
+```
+
+> **Note:** `make train` expects the data snapshot at `data/raw/`.
+> If it's absent, the loader falls back to BigQuery (requires GCP credentials).
+> Run `cp .env.example .env` and set `PA_WAREHOUSE_SA_KEY` for BigQuery auth.
+
+See [`docs/methodology.md → MLflow Setup`](docs/methodology.md#mlflow-setup)
+for the backend-store choice rationale and a full list of logged params/metrics.
 
 ---
 

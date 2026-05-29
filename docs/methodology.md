@@ -15,12 +15,13 @@ It grows one section per loop. Sections present today:
 | Section | Loop | Story |
 |---|---|---|
 | [Cross-Model Comparison Methodology](#cross-model-comparison-methodology) | 2 | 2.5 / 2.5.6 |
+| [MLflow Setup](#mlflow-setup) | 2 | 2.7 |
 
 Sections scaffolded for later loops (added when the work ships, not before):
-*EBM Preprocessing Sensitivity* (2.9) · *MLflow Setup* (2.7) · *Threshold
-Calibration — the no-SMOTE rationale* (3.3.5) · *Flat-CV vs Nested-CV* (3.5.6)
-· *Test Quality / Mutation Testing* (3.7) · *Fairness Thresholds + Chouldechova*
-(Epic 5) · *Adversarial SHAP* (Epic 6).
+*EBM Preprocessing Sensitivity* (2.9) · *Threshold Calibration — the no-SMOTE
+rationale* (3.3.5) · *Flat-CV vs Nested-CV* (3.5.6) · *Test Quality / Mutation
+Testing* (3.7) · *Fairness Thresholds + Chouldechova* (Epic 5)
+· *Adversarial SHAP* (Epic 6).
 
 ---
 
@@ -292,3 +293,67 @@ paired-bootstrap CIs in this section were generated with SEED=42 on the
 > **Rung 1 caption (carried on every score in this project):**
 > *AUC-PR = 0.309 — associational, not causal (Rung 1).* The model ranks who is
 > likely to leave; it does **not** establish that any feature *causes* leaving.
+
+---
+
+## MLflow Setup
+
+*Loop 2 — Story 2.7. Reproduce with `make train` then `make mlflow-ui`.*
+
+### The choice: local file-store, no hosted server
+
+We use MLflow with the **local file-store backend** (`mlruns/` at project root).
+No hosted tracking server, no managed service, no Docker dependency.
+
+**Why:** Hosted servers (MLflow Tracking Server mode, W&B, Comet) add
+infrastructure without adding portfolio signal for a single-dataset project.
+The local file-store is self-contained — every cloner gets a fresh, reproducible
+tracking store from their own training runs after `make train`. Nothing needs to
+be configured, no credentials issued, no service running before the demo.
+
+**Production path:** Swapping the backend is one environment variable.
+`export MLFLOW_TRACKING_URI=http://my-tracking-server:5000` before running
+changes the store without touching code. `src/retention/models/tracking.py`
+calls `mlflow.set_tracking_uri(str(config.PROJECT_ROOT / "mlruns"))` as a
+default; a production deployment would override via that env-var convention.
+
+**Why not W&B / Comet?** These are excellent tools; they're excluded here
+because most JDs that mention experiment tracking name MLflow specifically
+(Visier, Lattice, Personio tier). The ATS keyword is `mlflow`, not `w&b`.
+
+### `mlruns/` is gitignored on purpose
+
+The tracking store is not committed. `make train` populates it from scratch;
+it is therefore reproducible by any reviewer with the data file, and does not
+bloat the repository with binary artifacts. The screenshot
+(`reports/figures/mlflow_experiment_view.png`) is the committed artifact — it
+gives the README reader the UI context without requiring them to run the
+training pipeline just to see the chart.
+
+### What each run logs
+
+`src/retention/models/tracking.py::log_run()` wraps `mlflow.start_run()` and
+logs:
+
+| Logged item | MLflow category | Example |
+|---|---|---|
+| `model` | param | `"GBM"` |
+| `cohort` | param | `"hybrid"` |
+| `seed` | param | `42` |
+| Model hyperparams | params | `n_estimators=300, max_depth=4, learning_rate=0.05` |
+| `auc_pr` | metric | `0.309` |
+| `auc_roc` | metric | `0.661` |
+| `prec_at_10` | metric | `0.350` |
+| `prec_at_20` | metric | `0.333` |
+| `rec_at_10` | metric | `0.179` |
+| `brier` | metric | `0.158` |
+
+Metric keys are MLflow-safe identifiers (no `@` or `%`). The UI column headers
+show these keys; the notebook's DataFrame uses the display names (`Prec@10%`
+etc.). Both refer to the same computed values.
+
+> **Note — MLflow Model Registry (Story 2.7.10):** After Story 3.6 selects
+> the champion model (Epic 3), `log_run()` returns the `run_id`, which is
+> passed to `mlflow.register_model(f"runs:/{run_id}/model", "rp-champion")`.
+> The registry promotes the model through Staging → Production — a lifecycle
+> signal senior reviewers look for. This section will be updated at that point.
