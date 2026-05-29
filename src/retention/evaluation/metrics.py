@@ -213,6 +213,54 @@ def brier_score(
     return float(brier_score_loss(y_true, proba))
 
 
+def lift_at_k(
+    y_true: pd.Series | np.ndarray,  # type: ignore[type-arg]
+    y_proba: np.ndarray,  # type: ignore[type-arg]
+    k: float = 0.10,
+) -> float:
+    """Lift in the top-k fraction of employees ranked by predicted exit risk.
+
+    Lift = precision_at_k / base_rate.
+
+    The operational translation: "If the model flags the top k% of employees,
+    how many times more exits does that group contain than a random sample of
+    the same size?" A lift of 2.0 means the model is 2x better than random
+    at surfacing real exits in the top-k slice.
+
+    Lift is the dimensionless complement to precision@k — it normalises out the
+    base rate, making models comparable across datasets with different prevalence.
+    A model with precision@10% = 0.35 on a 20% base rate (lift = 1.75) is doing
+    less well than one with precision@10% = 0.25 on a 10% base rate (lift = 2.5).
+
+    Args:
+        y_true: Binary ground-truth labels (0/1 or bool).
+        y_proba: Predicted probabilities for the positive class.
+            Shape (n_samples,) or (n_samples, 2).
+        k: Fraction of the population to flag (0.10 = top 10 %).
+
+    Returns:
+        Lift in the top-k bucket. 1.0 = no better than random; > 1.0 = model
+        identifies exits more efficiently than random. Returns 0.0 if
+        base_rate is 0 (degenerate label set with no positives).
+
+    Raises:
+        ValueError: if k is not in (0, 1].
+    """
+    import numpy as np  # noqa: PLC0415
+
+    if not 0 < k <= 1:
+        raise ValueError(f"k must be in (0, 1], got {k}.")
+
+    base_rate = float(np.asarray(y_true).mean())
+    if base_rate == 0.0:
+        return 0.0
+
+    # Lift is the ratio of precision@k to the base rate.
+    # precision_at_k handles the top-k slicing and binary averaging.
+    prec = precision_at_k(y_true, y_proba, k=k)
+    return prec / base_rate
+
+
 def format_rung1_caption(value: float) -> str:
     """Return a Rung 1 captioned string for use in notebooks and model cards.
 
