@@ -1,7 +1,7 @@
 # Methodology — retention-prediction
 
 **Status:** living document — one section accretes per loop
-**Last updated:** 2026-05-29 (Loop 2 — rp-prey-002, Story 3.5)
+**Last updated:** 2026-05-29 (Loop 2 — rp-prey-002, Story 3.6)
 **Companion docs:** `architecture.md` (data flow), `data_card.md` (dataset), `integration_contract.md` (schema)
 
 This document records the *methodological* choices behind the model — the
@@ -20,6 +20,7 @@ It grows one section per loop. Sections present today:
 | [Threshold Calibration](#threshold-calibration) | 2 | 3.3 |
 | [Expected Value and p_eff Sensitivity](#expected-value-and-p_eff-sensitivity) | 2 | 3.4 |
 | [Flat-CV vs Nested-CV](#flat-cv-vs-nested-cv) | 2 | 3.5 |
+| [Champion Selection](#champion-selection) | 2 | 3.6 / 2.7.10 |
 
 Sections scaffolded for later loops (added when the work ships, not before):
 *Test Quality / Mutation Testing* (3.7) ·
@@ -355,11 +356,16 @@ Metric keys are MLflow-safe identifiers (no `@` or `%`). The UI column headers
 show these keys; the notebook's DataFrame uses the display names (`Prec@10%`
 etc.). Both refer to the same computed values.
 
-> **Note — MLflow Model Registry (Story 2.7.10):** After Story 3.6 selects
-> the champion model (Epic 3), `log_run()` returns the `run_id`, which is
-> passed to `mlflow.register_model(f"runs:/{run_id}/model", "rp-champion")`.
-> The registry promotes the model through Staging → Production — a lifecycle
-> signal senior reviewers look for. This section will be updated at that point.
+> **MLflow Model Registry (Story 2.7.10) — shipped.** Where `log_run()` records
+> *every* training run for the experiment view, `register_champion()`
+> (`tracking.py`) records the *one* winner: it logs the champion's fitted
+> pipeline, registers it as **`rp-champion`**, and promotes the new version to
+> the **Production** stage — the named, versioned, stage-tagged lifecycle signal
+> senior reviewers look for. The current champion (GBM × hybrid) is registered
+> as `rp-champion` v1 → Production; Loop 4 loads it with
+> `mlflow.sklearn.load_model("models:/rp-champion/Production")`. The selection
+> logic and the val/test confirmation behind that registration are in
+> [Champion Selection](#champion-selection) below.
 
 ---
 
@@ -940,3 +946,154 @@ The `nested_cv_auc_pr` function and `NestedCVResult` live in
 `src/retention/evaluation/nested_cv.py` and are unit-tested in
 `tests/test_nested_cv.py` (17 cases). The full narrative including champion
 selection appears in `notebooks/03_evaluation_rigor.ipynb` (Story 3.6).
+
+---
+
+## Champion Selection
+
+*Loop 2 — Stories 3.6 (champion) and 2.7.10 (registry). Reproduce with `make evaluate`.*
+*Full narrative: `notebooks/03_evaluation_rigor.ipynb`.*
+
+Epic 3 built five lenses — discrimination (3.1), calibration (3.2), threshold
+(3.3), expected value (3.4), unbiased generalisation (3.5). This section is where
+they converge into the single decision the whole loop exists to make: **of the
+six model × cohort cells, which one ships?**
+
+### The rule — a gated rank, not a sort
+
+The naive answer is "highest AUC-PR." We reject it, because a cell can rank well
+while being mis-calibrated — and every downstream HR action (the threshold of
+3.3, the EV case of 3.4) is computed from *probabilities*, not ranks. A model
+whose probabilities lie is unsafe to operate even if it sorts employees
+correctly. So selection is a **two-stage gate**
+(`src/retention/evaluation/champion.py::select_champion`):
+
+1. **Calibration gate.** A cell is *eligible* only if its Brier ≤ the base-rate
+   Brier `β·(1 − β)`, where β is the validation prevalence. That bar is the Brier
+   of the best *constant* predictor (output β for everyone) — derivation in
+   `_base_rate_brier`. A cell below it provably beats "predict the base rate"; a
+   cell above it is worse than the trivial baseline at the one thing Brier
+   measures, and we refuse to operate its probabilities no matter how it ranks.
+2. **Discrimination rank.** Among the eligible cells, the champion is the highest
+   AUC-PR — the primary metric across every loop.
+3. **Honest fallback.** If *no* cell clears the gate, select the highest-AUC-PR
+   cell overall, set `passed_calibration_gate = False`, and say so. That path was
+   **not** taken here.
+
+This is not a new claim — it is the codification of the calibration fingerprint
+the comparison table (Story 2.5) already surfaced: GBM keeps its probabilities
+honest (`eval_metric='aucpr'`, no re-weighting), while `class_weight='balanced'`
+/ `compute_sample_weight` inflate LR's and EBM's.
+
+### The gate in numbers
+
+Validation prevalence β = 0.204, so the gate is `0.204 · 0.796 = 0.162`.
+
+| Cell | AUC-PR | Brier | Brier ≤ 0.162? | ECE |
+|---|---|---|---|---|
+| LR × hris_only | 0.284 | 0.237 | ✗ fail | 0.278 |
+| GBM × hris_only | 0.291 | 0.160 | ✓ **pass** | 0.061 |
+| EBM × hris_only | 0.253 | 0.237 | ✗ fail | 0.280 |
+| LR × hybrid | 0.298 | 0.236 | ✗ fail | 0.279 |
+| **GBM × hybrid** | **0.309** | **0.158** | ✓ **pass** | **0.048** |
+| EBM × hybrid | 0.259 | 0.234 | ✗ fail | 0.278 |
+
+**Exactly the two GBM cells clear the gate.** Among them, GBM × hybrid wins on
+AUC-PR (0.309 vs 0.291). The four `balanced`-reweighted cells (LR, EBM) fail by a
+wide margin — Brier ≈ 0.234–0.237, ~45 % above the bar — exactly as the
+comparison-table calibration aside predicted. The gate did real work: it
+eliminated four cells *before* discrimination was consulted, and two of those
+(LR × hybrid 0.298, LR × hris_only 0.284) **out-rank** the eligible GBM ×
+hris_only on AUC-PR. A naive sort would have shortlisted them; the gate correctly
+refused, because their probabilities are worse than guessing the base rate.
+
+### The champion: GBM × hybrid
+
+| Metric | Validation (selected on) | Test (confirmed once) | Optimism gap |
+|---|---|---|---|
+| AUC-PR | 0.309 | 0.274 | +0.035 |
+| Precision@10 % | 0.350 | 0.250 | +0.100 |
+| ECE | 0.048 | 0.096 | −0.048 |
+| Brier | 0.158 | 0.173 | −0.015 |
+
+Operating threshold: **0.05** — the F2-optimal point on validation, i.e. the
+[FLIP-RISK] recall-weighted operating point Story 3.3 argues for (recall matters
+more than precision when a missed exit costs more than a wasted conversation). At
+p_eff = 0.30 that operating point is worth **+$701,000**, with breakeven at
+p_eff = **0.100** (Story 3.4's framing applied to the champion's own threshold).
+
+### Test-set discipline — confirmed once, and the honest read
+
+The champion was chosen **entirely on validation**. The held-out test set is
+touched exactly once, here, to confirm it generalises — never to choose it. Both
+metric sets are stored on the persisted artifact (`val_metrics`, `test_metrics`)
+so the optimism gap is visible in the record, not hidden.
+
+The read is honest both ways:
+
+- **Discrimination holds.** Test AUC-PR 0.274 sits +0.035 below validation — a
+  modest, expected optimism gap, and still well above the test no-skill baseline
+  (β = 0.215). It also lands inside one standard deviation of the unbiased
+  nested-CV mean from Story 3.5 (0.269 ± 0.024) — the cross-check that the
+  validation pick was not a fold-luck artefact.
+- **Calibration is marginal on test.** Test Brier 0.173 is *just above* the
+  test base-rate Brier (`0.215 · 0.785 = 0.169`): the champion clears the gate on
+  the selection set (as the rule requires) but narrowly misses it on test. This
+  is the calibration analogue of the AUC-PR optimism gap, and exactly what
+  39-/41-positive splits produce. The honest framing — the *ranking* generalises
+  cleanly; the *probabilities* are good but not bullet-proof off-sample. That is
+  why every EV figure ships with the p_eff sweep rather than a point claim, and
+  why a production deployment would add an explicit calibration step (isotonic /
+  Platt) before freezing any threshold.
+
+### Persistence and registry — two paths to the same model
+
+- **File store.** `persist_champion()` pickles a `ChampionArtifact` — the fitted
+  pipeline + operating threshold + full provenance (the selection decision,
+  val/test metrics, feature names, seed, UTC timestamp) — to
+  `reports/models/champion.pkl`. Loop 4's write-back loads it with
+  `load_champion()`. The file is self-describing: a reviewer can unpickle it and
+  read exactly how it was chosen.
+- **MLflow Model Registry (Story 2.7.10).** `register_champion()` logs the
+  sklearn pipeline, registers it as **`rp-champion`**, and promotes the new
+  version to **Production**. The current champion is `rp-champion` **v1 →
+  Production**; load it with
+  `mlflow.sklearn.load_model("models:/rp-champion/Production")`. Where the
+  experiment view (Story 2.7) records *every* run, the registry records the *one*
+  winner. Inspect it with `make mlflow-ui` → *Models* tab → `rp-champion`.
+
+### Honest caveats
+
+1. **Underpowered, like all of Loop 2.** The champion is selected on 39
+   validation positives and confirmed on 41 test positives. The decision
+   *procedure* is sound; the specific numbers carry the wide error bars the
+   bootstrap (2.5) and nested CV (3.5) already quantified.
+2. **The gate is a validation-set gate by design.** Eligibility is decided at
+   β = 0.204 on validation, because selection must happen before the test set is
+   opened. Test calibration is *reported*, not gated — and it came in marginal,
+   as disclosed above.
+3. **Single synthetic dataset, no tuning.** The champion uses GBM defaults
+   (`scale_pos_weight` off). The ranking is a property of this synthetic signal;
+   a real deployment re-runs the whole gate on its own data, and would likely add
+   hyperparameter tuning and explicit probability calibration before freezing a
+   threshold.
+
+### How to reproduce
+
+```bash
+make evaluate
+```
+
+Regenerates and re-executes `notebooks/03_evaluation_rigor.ipynb` end to end (the
+nested-CV cell needs a raised per-cell timeout, set in the target). It writes
+`reports/models/champion.pkl` and registers `rp-champion/Production` in `mlruns/`.
+The `select_champion`, `ChampionSelection`, `ChampionArtifact`,
+`persist_champion`, and `load_champion` objects live in
+`src/retention/evaluation/champion.py` and are unit-tested in
+`tests/test_champion.py`; `register_champion` lives in
+`src/retention/models/tracking.py` and is tested in `tests/test_tracking.py`.
+
+> **Rung 1 caption:** *The champion ranks who is likely to leave (test AUC-PR
+> 0.274 — associational, Rung 1). It does not establish that any feature *causes*
+> leaving, nor that intervening *causes* retention; the EV case prices the
+> ranking under an assumed p_eff, it does not measure a causal effect.*

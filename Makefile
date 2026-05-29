@@ -79,7 +79,12 @@ train:
 	@echo "Run 'make mlflow-ui' to open the comparison view."
 
 evaluate:
-	@echo "Epic 3 — coming soon (Story 3.1 AUC-PR in Loop 1; Stories 3.2-3.5 calibration/threshold/EV/CV in Loop 2)"
+	uv run python scripts/generate_evaluation_notebook.py
+	uv run jupyter nbconvert --to notebook --execute --inplace --ExecutePreprocessor.timeout=600 notebooks/03_evaluation_rigor.ipynb
+	@echo ""
+	@echo "Evaluation complete. Champion -> reports/models/champion.pkl;"
+	@echo "registered as rp-champion/Production in mlruns/."
+	@echo "Run 'make mlflow-ui', then open the Models tab to inspect the registry."
 
 fairness:
 	@echo "Epic 5 — coming soon (Loop 3a — Fairlearn audit + compound attribute + intervention category)"

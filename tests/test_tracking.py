@@ -43,9 +43,11 @@ from typing import Generator
 
 import mlflow
 import mlflow.tracking
+import numpy as np
 import pytest
+from sklearn.linear_model import LogisticRegression
 
-from retention.models.tracking import log_run
+from retention.models.tracking import log_run, register_champion
 
 
 # ------------------------------------------------------------------ #
@@ -380,3 +382,103 @@ def test_log_run_artifact_paths_with_real_file_logs_artifact(
         f"Expected 'report.txt' in logged artifacts, got: {artifact_names}. "
         "Check that log_run() calls mlflow.log_artifact() when artifact_paths is non-empty."
     )
+
+
+# ------------------------------------------------------------------ #
+# register_champion — Model Registry (Story 2.7.10)                     #
+# ------------------------------------------------------------------ #
+
+
+def _tiny_fitted_model() -> LogisticRegression:
+    """A minimally-fitted sklearn estimator for registry tests.
+
+    register_champion only needs a fitted, sklearn-compatible object to hand to
+    ``mlflow.sklearn.log_model`` — the data is irrelevant to what we assert
+    (name, version, stage, logged params/metrics), so we use the smallest fit
+    that still has both classes present. ``pip_requirements=["scikit-learn"]``
+    is passed at every call site to skip MLflow's ~20s environment inference.
+    """
+    X = np.arange(20).reshape(10, 2).astype(float)
+    y = np.array([0, 1] * 5)
+    return LogisticRegression(max_iter=1000).fit(X, y)
+
+
+def test_register_champion_returns_run_id_and_version(isolated_store: Path) -> None:
+    """register_champion returns ``(run_id: str, version: int)`` — first reg is v1.
+
+    Each test gets a fresh ``tmp_path`` store via ``isolated_store``, so the
+    registry starts empty and the first registration is always version 1.
+    """
+    run_id, version = register_champion(
+        _tiny_fitted_model(),
+        experiment_name=_unique_experiment(),
+        pip_requirements=["scikit-learn"],
+    )
+    assert isinstance(run_id, str) and len(run_id) > 0
+    assert isinstance(version, int)
+    assert version == 1
+
+
+def test_register_champion_registers_under_name(isolated_store: Path) -> None:
+    """The model is registered under the given name and is queryable by it."""
+    name = "rp-champion-test"
+    register_champion(
+        _tiny_fitted_model(),
+        registered_name=name,
+        experiment_name=_unique_experiment(),
+        pip_requirements=["scikit-learn"],
+    )
+    model = _client(isolated_store).get_registered_model(name)
+    assert model.name == name
+
+
+def test_register_champion_promotes_to_production(isolated_store: Path) -> None:
+    """The registered version is transitioned to the Production stage.
+
+    This is the win-condition contract: ``models:/rp-champion/Production`` must
+    resolve, which requires the version to actually carry the Production stage.
+    """
+    name = "rp-champion-test"
+    _, version = register_champion(
+        _tiny_fitted_model(),
+        registered_name=name,
+        stage="Production",
+        experiment_name=_unique_experiment(),
+        pip_requirements=["scikit-learn"],
+    )
+    mv = _client(isolated_store).get_model_version(name, str(version))
+    assert mv.current_stage == "Production"
+
+
+def test_register_champion_logs_params_and_metrics(isolated_store: Path) -> None:
+    """Provenance params/metrics passed to register_champion land on the run."""
+    run_id, _ = register_champion(
+        _tiny_fitted_model(),
+        params={"model": "GBM", "cohort": "hybrid"},
+        metrics={"test_auc_pr": 0.27},
+        experiment_name=_unique_experiment(),
+        pip_requirements=["scikit-learn"],
+    )
+    run = _client(isolated_store).get_run(run_id)
+    assert run.data.params["model"] == "GBM"
+    assert run.data.params["cohort"] == "hybrid"
+    assert run.data.metrics["test_auc_pr"] == pytest.approx(0.27)
+
+
+def test_register_champion_second_call_increments_version(isolated_store: Path) -> None:
+    """Registering the same name twice in one store yields versions 1 then 2."""
+    name = "rp-champion-test"
+    exp = _unique_experiment()
+    _, v1 = register_champion(
+        _tiny_fitted_model(),
+        registered_name=name,
+        experiment_name=exp,
+        pip_requirements=["scikit-learn"],
+    )
+    _, v2 = register_champion(
+        _tiny_fitted_model(),
+        registered_name=name,
+        experiment_name=exp,
+        pip_requirements=["scikit-learn"],
+    )
+    assert (v1, v2) == (1, 2)
