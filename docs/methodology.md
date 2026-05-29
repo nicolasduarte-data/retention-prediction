@@ -1,7 +1,7 @@
 # Methodology — retention-prediction
 
 **Status:** living document — one section accretes per loop
-**Last updated:** 2026-05-29 (Loop 2 — rp-prey-002, Story 2.9)
+**Last updated:** 2026-05-29 (Loop 2 — rp-prey-002, Story 3.3)
 **Companion docs:** `architecture.md` (data flow), `data_card.md` (dataset), `integration_contract.md` (schema)
 
 This document records the *methodological* choices behind the model — the
@@ -17,12 +17,12 @@ It grows one section per loop. Sections present today:
 | [Cross-Model Comparison Methodology](#cross-model-comparison-methodology) | 2 | 2.5 / 2.5.6 |
 | [MLflow Setup](#mlflow-setup) | 2 | 2.7 |
 | [EBM Preprocessing Sensitivity](#ebm-preprocessing-sensitivity) | 2 | 2.9 |
+| [Threshold Calibration](#threshold-calibration) | 2 | 3.3 |
 
 Sections scaffolded for later loops (added when the work ships, not before):
-*Threshold Calibration — the no-SMOTE
-rationale* (3.3.5) · *Flat-CV vs Nested-CV* (3.5.6) · *Test Quality / Mutation
-Testing* (3.7) · *Fairness Thresholds + Chouldechova* (Epic 5)
-· *Adversarial SHAP* (Epic 6).
+*Expected Value + p_eff sensitivity* (3.4) · *Flat-CV vs Nested-CV* (3.5.6) ·
+*Test Quality / Mutation Testing* (3.7) · *Fairness Thresholds + Chouldechova*
+(Epic 5) · *Adversarial SHAP* (Epic 6).
 
 ---
 
@@ -469,3 +469,145 @@ comparison is robust to that choice.
 > trails GBM/hybrid by 0.038, confirming that preprocessing accounts for at
 > most 25 % of EBM's gap behind the leader. The cross-model ranking is robust
 > to preprocessing choice.*
+
+---
+
+## Threshold Calibration
+
+*Loop 2 — Story 3.3. Reproduce with `uv run python scripts/generate_threshold_figure.py`.*
+
+Calibration (Story 3.2) asked whether the probabilities are *trustworthy
+numbers*. This section asks the next question: **given trustworthy
+probabilities, where do we draw the line between "flag for a retention
+conversation" and "leave alone"?** A probability is not a decision; an HR team
+needs a binary flag, and a flag needs an operating threshold. The default 0.5 is
+almost never right under a 20 % base rate — demanding `p > 0.5` to act flags
+almost no one, so real exits slip through. We pick the threshold empirically,
+and we frame that choice two ways: as a controlled experiment, and as the honest
+alternative to resampling.
+
+### Framing 1 — threshold selection is a controlled experiment
+
+Sweeping the threshold is neither retraining nor hyperparameter tuning. The
+model's ranking is **frozen** — every employee's predicted probability is fixed.
+We vary only the cut-point, so each candidate threshold is a **treatment arm**:
+the decision policy *"flag everyone with `p ≥ t`"* applied to the same scored
+population. We evaluate every arm on the same held-out set, score each on a
+**pre-declared** metric, and adopt the empirically-winning arm.
+
+That is the discipline of an A/B test: pre-register the metric, compare arms on
+common held-out data, pick the winner, confirm on a fresh sample. The honest
+limit of the analogy — stated so a reviewer doesn't have to catch us on it — is
+that this is a **within-system** experiment, not a randomized **between-system**
+one. A classic A/B test randomizes users across two competing systems; here
+there is one deployed system and the arms are its operating points, all scored on
+the same fixed validation rows (a within-subjects comparison, closer to offline
+policy evaluation than to randomized assignment). The **mechanism** differs; the
+**discipline** transfers intact. Naming it correctly is the point — every
+threshold-selection process in ML is implicitly this experiment; most
+practitioners simply never label it one.
+
+### Framing 2 — why a threshold, not SMOTE (the [FLIP-RISK] verdict)
+
+The textbook reflex for a 20 % positive rate is to resample (SMOTE). We refuse,
+for two reasons that compound:
+
+1. **SMOTE breaks the temporal split.** It synthesises minority rows by
+   interpolating between existing ones. Those synthetic employees have no place
+   in time — they straddle the train/val boundary in feature space, quietly
+   voiding the ordering guarantee `temporal_split()` and `assert_no_temporal_leak()`
+   exist to protect.
+2. **SMOTE distorts calibration.** Inflating minority density breaks the
+   "predicted 0.30 ≈ observed 0.30" property verified one section above — and
+   Epic 3's entire downstream chain (calibration → threshold → expected value) is
+   built on that property. Resampling would saw off the branch we are standing on.
+
+Threshold calibration reaches the same operational goal — catch more exits —
+**without touching the data distribution at all.** We keep the honest, calibrated
+probabilities and simply move the decision line. This is the **[FLIP-RISK]**
+mitigation named in the Loop 1 risk register: the expensive failure is a *missed
+exit* (a regretted-attrition employee we failed to flag), far costlier than a
+*wasted conversation* (a retention chat with someone who would have stayed). The
+F2 criterion encodes that asymmetry — it weights recall twice as heavily as
+precision — so the F2-optimal arm sits at or below the F1-optimal one, accepting
+more false positives to miss fewer real exits.
+
+### Leakage discipline — sweep on validation, confirm on test once
+
+Choosing an operating point is a model-selection decision, so the sweep runs on
+the **validation** split. Optimising the threshold on test and then reporting
+test metrics at that threshold is leakage — tuning on the data you report on. The
+winning arm is confirmed **once** on the held-out test set at champion selection
+(Story 3.6); until then the test split stays pristine, exactly as it has since
+Story 2.5. Every number below is a validation-set number.
+
+### Results — operating points for the leading model
+
+We sweep thresholds 0.05 → 0.95 in 0.01 steps (91 arms) for **GBM × hybrid** —
+the Loop 2 point-estimate leader, and the only cell whose probabilities are
+calibrated enough (Brier 0.158) to make a threshold meaningful. Validation set:
+191 rows, 39 positives, base rate **0.204**.
+
+| Criterion | Optimal t | Precision | Recall | F1 | F2 | TP / FP / FN | Flagged |
+|---|---|---|---|---|---|---|---|
+| **F1** (balanced) | **0.18** | 0.343 | 0.615 | 0.440 | 0.531 | 24 / 46 / 15 | 70 (37 %) |
+| Youden's J | 0.18 | 0.343 | 0.615 | 0.440 | 0.531 | 24 / 46 / 15 | 70 (37 %) |
+| F2 (recall-weighted) | 0.05 | 0.222 | 1.000 | 0.363 | 0.587 | 39 / 137 / 0 | 176 (92 %) |
+
+Three findings, each worth stating plainly:
+
+**The F1 arm (t = 0.18) is the sensible default.** It flags 37 % of the
+workforce, catches 62 % of all exits (recall 0.615), and the flagged group exits
+at 34.3 % versus the 20.4 % base rate — a **1.68× lift** in the people HR actually
+talks to. The optimal threshold is far below 0.5, which is the whole reason we
+sweep: the default cut-point would have flagged almost no one.
+
+**F1 and Youden agree exactly (t = 0.18).** Two criteria built on different
+foundations — F1 from precision/recall, Youden's J from sensitivity/specificity
+and prevalence-free by construction — converge on the same arm. That agreement is
+a small robustness signal: the operating point is not an artifact of one metric's
+idiosyncrasy.
+
+**The F2 arm collapses to the grid floor (t = 0.05) — and that is the honest,
+instructive result.** Pure recall-weighting on 39 positives has no brake: F2
+keeps lowering the threshold to buy recall until it flags 176 of 191 employees
+(92 %) and reaches recall 1.0 — at which point precision (0.222) is barely above
+the base rate. "Talk to everyone" is not an operating policy; it is the *absence*
+of one. This is precisely why **F-beta is the wrong final tool for this decision**
+and Story 3.4 exists: F-beta encodes a *fixed, unitless* recall-to-precision
+ratio, but the real trade-off is **dollars** — a wasted conversation costs
+manager + HRBP time, a missed exit costs a replacement hire. Only an explicit
+expected-value model (3.4), which prices false positives and false negatives in
+currency, can discipline the threshold to reflect actual business cost rather
+than an arbitrary β. The F2 collapse is the *motivating failure* for the EV
+framing, not a number to report as a recommendation.
+
+### Honest caveats
+
+1. **Underpowered, like everything in Loop 2.** 39 validation positives make
+   every operating point an estimate with wide error bars. The F1 arm at 0.18 is
+   *illustrative of the procedure*, not a production setting carved in stone — it
+   is re-derived and confirmed on the test set at champion selection (3.6).
+2. **The threshold is dataset- and cost-specific.** It is correct only for this
+   synthetic signal, at this base rate, under an unspecified cost ratio. Story
+   3.4 makes the cost ratio explicit; a real deployment would re-sweep on its own
+   data with its own replacement and intervention costs.
+3. **Precision drops to zero past t ≈ 0.43** in the figure because the model's
+   maximum predicted probability on the validation set is ≈ 0.42 — no employee is
+   flagged above it, the confusion matrix empties, and precision is 0 by the
+   `0/0 → 0` convention. That ceiling is itself a (reassuring) calibration fact: a
+   well-behaved model at a 20 % base rate should not be emitting 0.9 exit
+   probabilities.
+
+### How to reproduce
+
+```bash
+uv run python scripts/generate_threshold_figure.py
+```
+
+Trains GBM × hybrid on `data/raw/v_attrition_features_2026-05-28.csv` (SEED = 42),
+sweeps thresholds on the validation set, and writes
+`reports/figures/threshold_sweep.png` — the treatment-arm comparison with the F1
+and F2 arms marked. The `optimize_threshold`, `threshold_sweep`, and
+`threshold_sweep_plot` functions live in `src/retention/models/threshold.py` and
+are unit-tested in `tests/test_threshold.py` (19 cases).
