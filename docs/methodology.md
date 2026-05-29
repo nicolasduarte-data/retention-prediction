@@ -1,7 +1,7 @@
 # Methodology — retention-prediction
 
 **Status:** living document — one section accretes per loop
-**Last updated:** 2026-05-29 (Loop 2 — rp-prey-002, Story 3.3)
+**Last updated:** 2026-05-29 (Loop 2 — rp-prey-002, Story 3.4)
 **Companion docs:** `architecture.md` (data flow), `data_card.md` (dataset), `integration_contract.md` (schema)
 
 This document records the *methodological* choices behind the model — the
@@ -18,11 +18,11 @@ It grows one section per loop. Sections present today:
 | [MLflow Setup](#mlflow-setup) | 2 | 2.7 |
 | [EBM Preprocessing Sensitivity](#ebm-preprocessing-sensitivity) | 2 | 2.9 |
 | [Threshold Calibration](#threshold-calibration) | 2 | 3.3 |
+| [Expected Value and p_eff Sensitivity](#expected-value-and-p_eff-sensitivity) | 2 | 3.4 |
 
 Sections scaffolded for later loops (added when the work ships, not before):
-*Expected Value + p_eff sensitivity* (3.4) · *Flat-CV vs Nested-CV* (3.5.6) ·
-*Test Quality / Mutation Testing* (3.7) · *Fairness Thresholds + Chouldechova*
-(Epic 5) · *Adversarial SHAP* (Epic 6).
+*Flat-CV vs Nested-CV* (3.5.6) · *Test Quality / Mutation Testing* (3.7) ·
+*Fairness Thresholds + Chouldechova* (Epic 5) · *Adversarial SHAP* (Epic 6).
 
 ---
 
@@ -611,3 +611,178 @@ sweeps thresholds on the validation set, and writes
 and F2 arms marked. The `optimize_threshold`, `threshold_sweep`, and
 `threshold_sweep_plot` functions live in `src/retention/models/threshold.py` and
 are unit-tested in `tests/test_threshold.py` (19 cases).
+
+---
+
+## Expected Value and p_eff Sensitivity
+
+*Loop 2 — Story 3.4. Reproduce with `uv run python scripts/generate_ev_figure.py`.*
+
+Threshold Calibration (Story 3.3) ended on a deliberate cliffhanger. Asked to
+honour the [FLIP-RISK] recall preference, the F2 criterion slid to the grid floor
+and flagged 92 % of the workforce — because **an F-score has no brake.** It
+encodes a fixed, unitless recall-to-precision ratio and never asks what a wasted
+conversation or a missed exit actually *costs*. This section supplies the brake by
+pricing the decision in dollars. It is the resolution the 3.3 write-up promised,
+not a new experiment.
+
+### The model — value of running the program vs. doing nothing
+
+Each employee is either flagged (`p ≥ t` → a retention conversation) or left
+alone. Three numbers price the consequences:
+
+| Symbol | Meaning | Value used |
+|---|---|---|
+| `rc` | replacement cost — fully-loaded cost to backfill a departure | $90,000 |
+| `ic` | intervention cost — manager + HRBP time for one conversation | $2,000 |
+| `p_eff` | effectiveness — fraction of flagged genuine exits actually retained | swept 0.1–0.9 |
+
+We score each confusion-matrix cell **relative to the do-nothing baseline** (flag
+no one, absorb every exit's replacement cost):
+
+| Cell | Outcome under the model | Value vs. baseline |
+|---|---|---|
+| TP | flag a true exit; retain with probability `p_eff` | `+p_eff·rc − ic` |
+| FP | flag someone who'd have stayed; waste the conversation | `−ic` |
+| FN | miss a true exit (identical to baseline) | `0` |
+| TN | correctly leave a stayer alone | `0` |
+
+Summing the only two non-zero cells:
+
+> **EV = p_eff · rc · TP − ic · (TP + FP)**
+
+The decisive line is that **the FN term cancels.** A missed exit costs the same
+replacement dollars whether or not the model exists, so it cannot be part of the
+model's *added* value. EV depends only on the **flagged** population (TP and FP) —
+the formula is telling you something true: this is the expected value of the *act
+of flagging*, and its quality is governed entirely by who lands on the list.
+
+### The double-count we did not make
+
+The textbook EV formula for this problem usually reads `EV = TP·(p_eff·rc) −
+FP·ic − FN·rc`, and it is wrong here. Subtracting `FN·rc` while also crediting
+`p_eff·rc` to TP **double-counts a flagged true exit**: it banks the `p_eff·rc`
+retention benefit *and* the full avoided `rc` (by lifting that employee out of the
+FN penalty). But a flagged exit is only saved `p_eff` of the time; the
+`(1 − p_eff)` who leave anyway still cost `rc`, which the naive formula silently
+books as $0. The overstatement is ≈ `rc + ic` per catch — and because it scales
+with TP, it stampedes the EV-optimal threshold toward "flag everyone" for a reason
+that is an **accounting error, not an economic truth.** The do-nothing baseline
+removes the temptation by construction: `rc` only ever appears multiplied by
+`p_eff`, never at full value. (The absolute unprevented loss, `FN·rc`, is real and
+worth *reporting* beside the EV as context — never inside the objective being
+optimised.)
+
+### Parameters and citations
+
+| Parameter | Value | Source |
+|---|---|---|
+| Replacement-cost multiplier | 1.5 × annual salary | SHRM (2024) fully-loaded replacement-cost rule of thumb — recruiting + onboarding + productivity ramp ≈ 1.5× salary |
+| Representative salary | $60,000 → `rc = $90,000` | stand-in; see note below |
+| Intervention cost | $2,000 | manager + HRBP preparation and meeting time for one retention conversation |
+| Effectiveness `p_eff` | 0.30 central, **swept 0.1–0.9** | a forward assumption — no dataset can measure it without running the program; the sweep is what makes the framing defensible |
+
+**Why a representative salary, not the cohort's actual mean.** The mart exposes
+`compa_ratio` (salary ÷ band midpoint), **not absolute salary** — the dataset is
+anonymised by design. So `rc` uses a representative $60k → $90k rather than a
+figure derived from the data. A real deployment substitutes the cohort's true mean
+salary via `replacement_cost_from_salary()`; every breakeven below is scale-free
+in `rc`, so only the y-axis magnitude moves, never the decision.
+
+### The breakeven closed form — precision buys robustness
+
+Set EV = 0 and solve for the effectiveness at which the program starts paying:
+
+> **p_eff\* = ic·(TP + FP) / (rc·TP) = (ic / rc) / precision**
+
+The breakeven is the cost ratio divided by the precision at that threshold. Two
+readings of the same identity:
+
+- **As a number:** at the F1 operating point (precision 0.343),
+  `p_eff* = (2000/90000)/0.343 ≈ 0.065`. The program pays for itself if retention
+  conversations work even ~6–7 % of the time — a low, very crossable bar.
+- **As a principle:** **breakeven falls as precision rises.** A cleaner flag list
+  wastes less budget on false positives, so it tolerates *less* effective
+  interventions before it loses money. This is the economic argument for
+  precision@k (Story 3.1) and the natural counterweight to 3.3's F2 recall
+  pressure: recall fills the flag list; precision is what makes funding it
+  defensible.
+
+### Results — and the honest twist
+
+Applying the framing to the two operating points from Story 3.3 (GBM × hybrid,
+validation set, 39 positives):
+
+| Arm (from 3.3) | t | Precision | TP / FP | Breakeven p_eff | EV @ p_eff = 0.30 |
+|---|---|---|---|---|---|
+| **F1** (balanced) | 0.18 | 0.343 | 24 / 46 | **0.065** | **+$508,000** |
+| F2 (recall-weighted) | 0.05 | 0.222 | 39 / 137 | 0.100 | +$701,000 |
+
+The twist a careful reader must see: **at the central p_eff = 0.30, the
+recall-heavy F2 arm posts the higher total EV** ($701k vs $508k). At these costs
+an intervention is cheap — $2,000 against a $90,000 replacement — so the marginal
+flag pays off as long as the people it adds exit above the **marginal precision
+bar** `ic/(p_eff·rc) = 2000/27000 ≈ 7.4 %`. The base rate is 20.4 %, so at
+p_eff = 0.30 even indiscriminate widening adds value, and "flag almost everyone"
+maximises EV. **EV did not abolish the F2 collapse; it priced it.**
+
+So what does EV buy over the bare F-score? It converts the single unknown —
+effectiveness — into an explicit decision map:
+
+| If you believe… | Then… | Because |
+|---|---|---|
+| `p_eff > 0.10` | flag wide (F2 arm) | both arms profit; the wider net banks more total EV |
+| `0.065 < p_eff < 0.10` | flag selectively (F1 arm) | F2 is underwater here; only the precise arm pays |
+| `p_eff < 0.065` | don't run the program | no operating point breaks even |
+
+The F1 arm tolerates interventions **35 % less effective** than the F2 arm before
+it loses money (0.065 vs 0.100). That is the brake the F-score lacked: not a
+smaller flag list handed down by fiat, but an in-dollars statement of exactly
+*what each operating point is betting on*. Because we have never run the program
+and cannot read `p_eff` off the data, the lower-breakeven F1 arm is the more
+defensible default — and champion selection (Story 3.6) confirms it on the test
+set with this map in hand.
+
+### Leakage discipline — same rule as the sweep
+
+EV is computed on the **validation** split, from the same frozen probabilities and
+the same operating points the threshold sweep used. Choosing an operating point is
+model selection; the test set is confirmed once, at champion selection (3.6).
+Every dollar figure above is a validation-set number.
+
+### Honest caveats
+
+1. **`p_eff` is an assumption, not a measurement.** The whole program economics
+   hinge on a number no dataset can supply. We never report a single EV; the sweep
+   and the decision map are the honest deliverable. Only a pilot that measures
+   actual retention lift collapses the range.
+2. **Representative salary, not actual.** `rc = $90k` rests on a $60k stand-in
+   because the data is ratio-only (above). Breakevens are scale-free in `rc`, but
+   the absolute dollar magnitudes are illustrative, not this workforce's true P&L.
+3. **Underpowered, like all of Loop 2.** TP and FP come from 39 validation
+   positives, and the EV line inherits that fragility. The decision *map* is
+   robust (it is algebra); the specific dollar values are wide-error estimates.
+4. **EV is exactly linear in `p_eff`** at a fixed threshold — TP and FP are
+   constant, so the chart is a straight line by construction, not an empirical fit.
+   The structure worth reading is *where it crosses zero*, not its shape.
+5. **Rung 1 throughout.** EV prices the *ranking* the model produces; it makes no
+   causal claim that flagging an employee, or intervening, *causes* retention. The
+   `p_eff` parameter is exactly where a real causal effect would have to be
+   measured rather than assumed.
+
+### How to reproduce
+
+```bash
+uv run python scripts/generate_ev_figure.py
+```
+
+Trains GBM × hybrid on `data/raw/v_attrition_features_2026-05-28.csv` (SEED = 42),
+fixes the F1 operating point from Story 3.3, sweeps `p_eff` on the validation set,
+and writes `reports/figures/ev_sensitivity.png`. The `ev_at_threshold`,
+`p_eff_sensitivity_sweep`, `breakeven_p_eff`, and `expected_value_plot` functions
+live in `src/retention/evaluation/expected_value.py` and are unit-tested in
+`tests/test_expected_value.py` (32 cases).
+
+> **Rung 1 caption:** *EV in dollars is built on an associational ranking (Rung 1)
+> plus an assumed intervention effectiveness. It bounds the program's value under
+> stated assumptions; it does not prove that intervention causes retention.*
