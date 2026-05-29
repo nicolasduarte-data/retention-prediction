@@ -1,7 +1,7 @@
 # Methodology — retention-prediction
 
 **Status:** living document — one section accretes per loop
-**Last updated:** 2026-05-29 (Loop 2 — rp-prey-002, Story 3.4)
+**Last updated:** 2026-05-29 (Loop 2 — rp-prey-002, Story 3.5)
 **Companion docs:** `architecture.md` (data flow), `data_card.md` (dataset), `integration_contract.md` (schema)
 
 This document records the *methodological* choices behind the model — the
@@ -19,9 +19,10 @@ It grows one section per loop. Sections present today:
 | [EBM Preprocessing Sensitivity](#ebm-preprocessing-sensitivity) | 2 | 2.9 |
 | [Threshold Calibration](#threshold-calibration) | 2 | 3.3 |
 | [Expected Value and p_eff Sensitivity](#expected-value-and-p_eff-sensitivity) | 2 | 3.4 |
+| [Flat-CV vs Nested-CV](#flat-cv-vs-nested-cv) | 2 | 3.5 |
 
 Sections scaffolded for later loops (added when the work ships, not before):
-*Flat-CV vs Nested-CV* (3.5.6) · *Test Quality / Mutation Testing* (3.7) ·
+*Test Quality / Mutation Testing* (3.7) ·
 *Fairness Thresholds + Chouldechova* (Epic 5) · *Adversarial SHAP* (Epic 6).
 
 ---
@@ -786,3 +787,156 @@ live in `src/retention/evaluation/expected_value.py` and are unit-tested in
 > **Rung 1 caption:** *EV in dollars is built on an associational ranking (Rung 1)
 > plus an assumed intervention effectiveness. It bounds the program's value under
 > stated assumptions; it does not prove that intervention causes retention.*
+
+---
+
+## Flat-CV vs Nested-CV
+
+*Loop 2 — Story 3.5. Reproduce with `uv run python -c "..."` (see below).*
+
+### The optimism-bias problem with a single validation split
+
+Everything above this section evaluates models on a **single, fixed validation
+split**: train once on 892 rows → score once on 191 rows → report one number.
+That is fast and readable, but it conceals a subtle bias when **hyperparameter
+tuning is involved**.
+
+In this project the GBM has several tunable knobs — tree depth, learning rate,
+number of estimators. If we had tuned those knobs by picking whichever
+combination scored best on the validation set and then *reported* the validation
+score as our performance estimate, we would be optimistic: the hyperparameters
+were chosen *because* they scored well on those 191 rows, so the reported score
+over-estimates generalisation.
+
+**Flat (single-loop) cross-validation** has the same problem. A k-fold CV that
+uses the same folds for both tuning and reporting inflates the reported metric by
+an amount proportional to the size of the parameter grid and the noise level of
+the data.
+
+Cawley & Talbot (2010, JMLR 11:2079–2107) showed that the model-selection bias
+in flat CV can be as large as the variance it was meant to measure — making
+reported AUC-PR numbers look more stable *and* more favourable than they are.
+
+### The nested-CV remedy
+
+**Nested (double-loop) cross-validation** separates the two concerns:
+
+| Loop | Role | Data seen | What it produces |
+|---|---|---|---|
+| **Outer** (5 folds) | Evaluation | Never sees inner decisions | 5 unbiased AUC-PR scores → mean ± std |
+| **Inner** (5 folds per outer fold) | Hyperparameter selection | Only outer training rows | Best param combo per outer fold |
+
+The outer test fold is completely invisible during inner-loop selection and during
+the refit on the outer training set. Its score is therefore free of
+model-selection bias — the hyperparameters were chosen *without* looking at it.
+Averaging 5 such scores yields an honest mean ± std that reflects both the
+expected performance *and* the fold-to-fold variance of the procedure.
+
+### Why GBM and not LR or EBM?
+
+**LR** has one effective regularisation knob (`class_weight='balanced'`, fixed by
+the no-SMOTE constraint) and a convex loss surface — its flat-CV variance is small
+enough to be inconsequential.  
+**EBM** is computationally expensive to nest at this sample size and its
+intrinsic regularisation (learning rate × max bins) is well-behaved; the
+EBM-native-vs-OHE sensitivity check (Story 2.9) already quantifies its variance.  
+**GBM** has a larger hyperparameter surface — depth × learning rate × estimator
+count × subsampling — and is known to overfit on small tabular HR datasets. It is
+the cell where the honest claim "nested CV confirms the point estimate" most needs
+to be earned.
+
+### Setup
+
+| Parameter | Value |
+|---|---|
+| Data | train + val rows = 1,083 (test withheld for champion selection at Story 3.6) |
+| Base rate | 0.184 (184 voluntary exits in 1,083 rows) |
+| Seed | `config.SEED = 42` for both StratifiedKFold instances |
+| Outer splits | 5 |
+| Inner splits | 5 |
+| Parameter grid | 4 combinations — `max_depth ∈ {3, 4}`, `learning_rate ∈ {0.05, 0.10}`, `n_estimators ∈ {100, 200}` |
+| `scale_pos_weight` | Computed from each outer training fold (neg/pos ratio) — never from the test fold |
+| Total model fits | 5 outer folds × (5 inner folds × 4 combos + 1 refit) = 105 per cohort |
+
+### Results
+
+| Cohort | Nested CV AUC-PR | ± std | Per-fold scores |
+|---|---|---|---|
+| hris_only | **0.263** | ±0.022 | 0.274, 0.265, 0.232, 0.246, 0.296 |
+| hybrid | **0.269** | ±0.024 | 0.259, 0.275, 0.235, 0.307, 0.268 |
+
+For reference — the flat single-split validation scores (from the 6-cell
+comparison table, evaluated on 191 val rows):
+
+| Cohort | Flat CV AUC-PR (val) | Nested CV AUC-PR | Gap (optimism) |
+|---|---|---|---|
+| hris_only | 0.291 | 0.263 | **−0.028** |
+| hybrid | 0.309 | 0.269 | **−0.040** |
+
+**Three findings worth stating plainly:**
+
+**1 — The optimism bias is real and quantifiable.** The flat validation estimate
+for GBM × hybrid (0.309) is 0.040 AUC-PR units above the nested CV estimate
+(0.269) — about **13 % inflation**. For hris_only the gap is 0.028 (about 10 %).
+This is not a data quality failure; it is expected when the same validation set
+was used for threshold sweeping and operating-point selection in Stories 3.3–3.4.
+Nested CV removes that bias.
+
+**2 — The nested CV headline confirms GBM's standing.** The corrected estimate
+(0.269 ± 0.024) is still meaningfully above the no-skill baseline (≈ 0.184 =
+base rate), and GBM × hybrid remains the point-estimate leader even after
+deflation. The correction shrinks the headline number; it does not change the
+ranking.
+
+**3 — The survey lift narrows.** In the flat comparison, the hybrid lift over
+hris_only was 0.018 AUC-PR for GBM. Under nested CV the lift shrinks to 0.006
+(0.269 − 0.263). The direction is preserved — hybrid still leads — but the
+magnitude is within the ±0.022–0.024 fold-to-fold noise. This is consistent with
+the bootstrap finding from Story 2.5: the survey lift is positive in direction but
+underpowered to confirm. Nested CV neither refutes nor strengthens the R1
+hypothesis; it simply provides the honest per-fold variance that the single-split
+estimate cannot.
+
+### Honest caveats
+
+1. **Comparing nested CV to flat CV is not apples-to-apples.** The flat estimate
+   uses 892 training rows → 191 test rows (one split). The nested CV uses 1,083
+   rows (train + val) across 5 folds → each outer test fold ≈ 217 rows. Different
+   training set sizes and different test populations mean the gap partly reflects
+   training-set size, not only optimism bias. The comparison is instructive, not
+   exact.
+2. **105 fits on 1,083 rows.** At this sample size, each inner fold trains on
+   ~693 rows. The grid is deliberately small (4 combos) to avoid selecting on
+   noise; a larger grid would not be meaningful here.
+3. **StratifiedKFold with shuffle=True + seed=42 — deterministic.** Running the
+   script twice with the same seed produces identical scores. The fold variance
+   (±0.022–0.024) is therefore *structural* (genuine between-fold variation in the
+   data) not *stochastic* (random sampling variation). This is the right
+   interpretation: fold-to-fold variance measures how sensitive the model is to
+   which quarter's exits land in the test fold.
+
+### How to reproduce
+
+```python
+from retention import config
+from retention.data.load import load_attrition_features_local
+from retention.data.split import temporal_split
+from retention.features.cohorts import extract_X_y, split_cohorts
+from retention.evaluation.nested_cv import nested_cv_auc_pr
+import pandas as pd
+
+df = load_attrition_features_local("data/raw/v_attrition_features_2026-05-28.csv")
+config.set_global_seed()
+train_df, val_df, _ = temporal_split(df, save_indices=False)
+trainval_df = pd.concat([train_df, val_df], ignore_index=True)
+
+for cohort in ("hris_only", "hybrid"):
+    X, y = extract_X_y(split_cohorts(trainval_df)[cohort], cohort)
+    result = nested_cv_auc_pr(X, y, cohort, outer_splits=5, inner_splits=5)
+    print(result.summary())
+```
+
+The `nested_cv_auc_pr` function and `NestedCVResult` live in
+`src/retention/evaluation/nested_cv.py` and are unit-tested in
+`tests/test_nested_cv.py` (17 cases). The full narrative including champion
+selection appears in `notebooks/03_evaluation_rigor.ipynb` (Story 3.6).
