@@ -83,3 +83,6 @@ mlartifacts/
 
 # --- Local pre-commit baseline scratch state ---
 .secrets.baseline.tmp
+
+# --- Mutation testing (Story 3.7) --- regenerable via `make mutation-test` ---
+.mutmut-cache

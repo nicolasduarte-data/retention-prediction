@@ -49,8 +49,27 @@ import matplotlib.axes
 import matplotlib.figure
 import numpy as np
 
+from retention.evaluation._validation import extract_positive_proba
+
 if TYPE_CHECKING:
     import pandas as pd
+
+
+def _bin_predictions(
+    proba: np.ndarray,  # type: ignore[type-arg]
+    n_bins: int,
+) -> np.ndarray:  # type: ignore[type-arg]
+    """Assign each prediction to an equal-width bin index in ``[0, n_bins - 1]``.
+
+    Shared by ``expected_calibration_error`` and ``reliability_diagram`` so the
+    binning is defined exactly once (feast T2-CAL-2 — the two copies previously
+    diverged under mutation and needed two parallel test families). Equal-width
+    edges ``[0, 1/n_bins, …, 1.0]``; ``np.digitize`` against the interior edges
+    returns a 0-indexed bin per prediction (a prediction of exactly 1.0 lands in
+    the final bin).
+    """
+    bin_edges = np.linspace(0.0, 1.0, n_bins + 1)
+    return np.digitize(proba, bin_edges[1:-1])
 
 
 def expected_calibration_error(
@@ -85,9 +104,11 @@ def expected_calibration_error(
             Default 10 → bins of width 0.1.
 
     Returns:
-        Float in [0, 1]. Lower is better calibrated.
-        Returns NaN if y_true has no variation (all 0 or all 1) —
-        calibration is undefined for a degenerate label set.
+        Float in [0, 1]. Lower is better calibrated. ECE is computed even for a
+        single-class label set (all 0 or all 1): with every label equal, each
+        populated bin's observed rate is 0 (or 1), so ECE collapses to the
+        weighted mean predicted probability — it does NOT return NaN. Read it
+        alongside the base rate, which a single-class set makes degenerate.
 
     Raises:
         ValueError: if n_bins < 2 or y_proba contains non-finite values.
@@ -102,21 +123,11 @@ def expected_calibration_error(
     if n_bins < 2:
         raise ValueError(f"n_bins must be >= 2, got {n_bins}.")
 
-    proba = np.asarray(y_proba)
-    if proba.ndim == 2:
-        proba = proba[:, 1]
-
-    if not np.isfinite(proba).all():
-        raise ValueError("y_proba contains non-finite values (NaN or Inf).")
-
+    proba = extract_positive_proba(y_proba)
     y_arr = np.asarray(y_true).astype(float)
     n = len(proba)
 
-    # Equal-width bin edges: [0, 0.1, 0.2, ..., 1.0] for n_bins=10.
-    # np.digitize assigns each prediction to a bin index 1..n_bins.
-    # We use edges[:-1] to get the lower bound of each bin.
-    bin_edges = np.linspace(0.0, 1.0, n_bins + 1)
-    bin_ids = np.digitize(proba, bin_edges[1:-1])  # 0-indexed bin assignments
+    bin_ids = _bin_predictions(proba, n_bins)  # 0-indexed bin assignments
 
     ece = 0.0
     for k in range(n_bins):
@@ -192,15 +203,11 @@ def reliability_diagram(
     """
     import matplotlib.pyplot as plt  # noqa: PLC0415
 
-    proba = np.asarray(y_proba)
-    if proba.ndim == 2:
-        proba = proba[:, 1]
-
+    proba = extract_positive_proba(y_proba)
     y_arr = np.asarray(y_true).astype(float)
 
-    # ── Bin the predictions ────────────────────────────────────────────────
-    bin_edges = np.linspace(0.0, 1.0, n_bins + 1)
-    bin_ids = np.digitize(proba, bin_edges[1:-1])
+    # ── Bin the predictions (shared helper — see _bin_predictions) ───────────
+    bin_ids = _bin_predictions(proba, n_bins)
 
     mean_predicted: list[float] = []  # x-axis: mean confidence per bin
     fraction_positive: list[float] = []  # y-axis: observed rate per bin

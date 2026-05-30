@@ -17,6 +17,16 @@ Why a shared fixture rather than duplicating in each test file?
 
 from __future__ import annotations
 
+# Force the non-interactive Agg backend *before* any matplotlib import occurs.
+# Without this, matplotlib may attempt to open a Tk window (TkAgg is the default
+# on many Windows installs). That works interactively but fails in headless
+# subprocess contexts — specifically when mutmut calls `python -m pytest` as a
+# child process.  Agg is a pure-software renderer (Anti-Grain Geometry) that
+# produces identical figure output without requiring a display.
+import matplotlib
+
+matplotlib.use("Agg")  # noqa: E402 (must precede any `import matplotlib.pyplot`)
+
 import numpy as np
 import pandas as pd
 import pytest

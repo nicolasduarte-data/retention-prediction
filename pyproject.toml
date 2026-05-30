@@ -63,6 +63,7 @@ Documentation = "https://github.com/nicolasduarte-data/retention-prediction#read
 [dependency-groups]
 dev = [
     "detect-secrets>=1.5",
+    "mutmut>=2.4,<3",
     "mypy>=1.10",
     "nbmake>=1.5",
     "nbstripout>=0.7",
@@ -104,6 +105,18 @@ exclude = ["scripts/"]
 module = "tests.*"
 disallow_untyped_defs = false
 disallow_incomplete_defs = false
+
+
+# ── Mutation testing — Story 3.7 ─────────────────────────────────────────────
+# Target: < 5 surviving mutants on src/retention/evaluation/.
+# Runner scoped to the 5 evaluation-specific test files plus -x (stop at first
+# failure) so each killed mutant pays only one test session, not 266.
+# simple_output avoids emoji encoding errors on Windows cp1252 consoles.
+[tool.mutmut]
+paths_to_mutate = "src/retention/evaluation/"
+runner = "python -m pytest tests/test_evaluation.py tests/test_metrics.py tests/test_expected_value.py tests/test_champion.py tests/test_nested_cv.py -x --tb=no -q"
+tests_dir = "tests/"
+simple_output = true
 
 
 [tool.pytest.ini_options]

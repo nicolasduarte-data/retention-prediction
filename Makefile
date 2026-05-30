@@ -12,7 +12,7 @@
 #   - On CI:      ubuntu-latest ships make by default
 
 .PHONY: help install lint test data train evaluate fairness explain report \
-        mlflow-ui repro coverage clean
+        mlflow-ui repro coverage mutation-test clean
 
 # Default target — show available commands.
 help:
@@ -23,10 +23,11 @@ help:
 	@echo "    clean       remove .pytest_cache, .ruff_cache, .mypy_cache, __pycache__"
 	@echo ""
 	@echo "  Quality gates (work today):"
-	@echo "    lint        uv run pre-commit run --all-files"
-	@echo "    test        uv run pytest with coverage"
-	@echo "    coverage    uv run pytest --cov + open htmlcov/index.html"
-	@echo "    repro       PYTHONHASHSEED=42 uv run pytest (deterministic hash)"
+	@echo "    lint           uv run pre-commit run --all-files"
+	@echo "    test           uv run pytest with coverage"
+	@echo "    coverage       uv run pytest --cov + open htmlcov/index.html"
+	@echo "    repro          PYTHONHASHSEED=42 uv run pytest (deterministic hash)"
+	@echo "    mutation-test  mutmut 2.x on src/retention/evaluation/ (Story 3.7)"
 	@echo ""
 	@echo "  Pipeline (ship as later stories land):"
 	@echo "    data        Epic 1 (Loop 1 — Story 1.1) — BigQuery loader"
@@ -65,6 +66,20 @@ coverage:
 # at runtime (see src/retention/config.py:set_global_seed docstring).
 repro:
 	PYTHONHASHSEED=42 uv run pytest --cov=src --cov-report=term-missing
+
+# Story 3.7 — mutation testing.
+# Runs mutmut 2.x on src/retention/evaluation/ (configured in pyproject.toml
+# under [tool.mutmut]).  Target: fewer than 5 surviving mutants.
+# Takes ~15-30 minutes on first run; results cached in .mutmut-cache/.
+# Interpret output: "Survived N" after `mutmut results` = mutations our tests
+# did not detect.  Use `uv run mutmut show <ID>` to inspect each survivor.
+mutation-test:
+	PYTHONUTF8=1 PYTHONIOENCODING=utf-8 uv run mutmut run
+	@echo ""
+	PYTHONUTF8=1 PYTHONIOENCODING=utf-8 uv run mutmut results
+	@echo ""
+	@echo "Target: < 5 surviving mutants. See docs/methodology.md -> Test Quality."
+	@echo "Inspect survivors with: uv run mutmut show <ID>"
 
 # --- Pipeline (placeholders until the relevant story lands) ---
 

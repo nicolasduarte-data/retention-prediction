@@ -28,6 +28,7 @@ from __future__ import annotations
 from typing import Any
 
 import mlflow
+import mlflow.exceptions
 import mlflow.sklearn
 
 from retention import config
@@ -205,14 +206,26 @@ def register_champion(
         run_id = str(run.info.run_id)
 
     # Register + promote after the run closes — the logged model already exists
-    # in the store, so these operate on a committed artifact.
-    model_version = mlflow.register_model(model_info.model_uri, registered_name)
-    client = mlflow.tracking.MlflowClient()
-    client.transition_model_version_stage(
-        name=registered_name,
-        version=model_version.version,
-        stage=stage,
-    )
+    # in the store, so these operate on a committed artifact. If either step
+    # fails, the model is logged but NOT registered/promoted — a partial state.
+    # Surface that explicitly (feast T2-SEL-3) so the operator re-runs
+    # registration against the intact logged model rather than re-training or
+    # hunting a half-finished registry.
+    try:
+        model_version = mlflow.register_model(model_info.model_uri, registered_name)
+        client = mlflow.tracking.MlflowClient()
+        client.transition_model_version_stage(
+            name=registered_name,
+            version=model_version.version,
+            stage=stage,
+        )
+    except mlflow.exceptions.MlflowException as exc:
+        raise RuntimeError(
+            f"Champion model was logged (run {run_id}) but registration/promotion "
+            f"to '{registered_name}/{stage}' failed: {exc}. The logged model is "
+            f"intact at {model_info.model_uri} — re-run register_champion (or "
+            f"register that URI manually); do NOT re-train."
+        ) from exc
     return run_id, int(model_version.version)
 
 

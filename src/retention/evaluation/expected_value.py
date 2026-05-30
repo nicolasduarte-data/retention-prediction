@@ -110,6 +110,8 @@ import matplotlib.axes
 import matplotlib.figure
 import numpy as np
 
+from retention.evaluation._validation import extract_positive_proba
+
 if TYPE_CHECKING:
     import pandas as pd
 
@@ -150,22 +152,6 @@ def replacement_cost_from_salary(annual_salary: float) -> float:
     if annual_salary < 0.0:
         raise ValueError(f"annual_salary must be >= 0, got {annual_salary}.")
     return REPLACEMENT_COST_MULTIPLIER * annual_salary
-
-
-def _prepare_proba(y_proba: np.ndarray) -> np.ndarray:  # type: ignore[type-arg]
-    """Coerce predicted probabilities to a finite 1-D positive-class vector.
-
-    Mirrors the input contract used across the evaluation package: accept either
-    a 1-D probability vector or a 2-column ``predict_proba`` output (column 1 is
-    the positive class), and reject non-finite values up front so a NaN can never
-    silently poison a dollar figure.
-    """
-    proba = np.asarray(y_proba)
-    if proba.ndim == 2:
-        proba = proba[:, 1]
-    if not np.isfinite(proba).all():
-        raise ValueError("y_proba contains non-finite values (NaN or Inf).")
-    return proba
 
 
 def _confusion_at_threshold(
@@ -254,7 +240,7 @@ def ev_at_threshold(
         something true: this is the expected value of the act of *flagging*, and
         its whole quality is governed by who lands in the flag list.
     """
-    proba = _prepare_proba(y_proba)
+    proba = extract_positive_proba(y_proba)
     _validate_threshold(threshold)
     if not 0.0 <= p_eff <= 1.0:
         raise ValueError(f"p_eff must be in [0, 1], got {p_eff}.")
@@ -378,7 +364,7 @@ def breakeven_p_eff(
         value rather than clamping it, so the caller can see how far past
         feasibility a bad operating point sits.
     """
-    proba = _prepare_proba(y_proba)
+    proba = extract_positive_proba(y_proba)
     _validate_threshold(threshold)
     _validate_costs(replacement_cost, intervention_cost, require_positive_replacement=True)
 
@@ -428,6 +414,15 @@ def expected_value_plot(
     """
     import matplotlib.pyplot as plt  # noqa: PLC0415
     import matplotlib.ticker as mticker  # noqa: PLC0415
+
+    # Validate the sweep up front (feast T2-EV-1): an empty frame makes
+    # `p_eff.min()` raise an opaque "zero-size array" error, and a wrong-shaped
+    # one raises a bare KeyError. Fail with a message that names the contract.
+    if sweep.empty or not {"p_eff", "expected_value"} <= set(sweep.columns):
+        raise ValueError(
+            "sweep must be a non-empty DataFrame with columns 'p_eff' and "
+            "'expected_value' (the output of p_eff_sensitivity_sweep)."
+        )
 
     # Direct if/else (not a stored predicate) so mypy narrows `ax` from
     # `Axes | None` to `Axes` in the else branch — same pattern as calibration.py.

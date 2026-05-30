@@ -104,8 +104,10 @@ class NestedCVResult:
                 Length equals ``outer_splits``.
         mean: Mean of outer-loop AUC-PR scores.
               Report this as the headline unbiased estimate.
-        std: Standard deviation of outer-loop AUC-PR scores.
-             Report this as the uncertainty band.
+        std: **Sample** standard deviation of outer-loop AUC-PR scores (ddof=1).
+             Report this as the uncertainty band. Sample std (not population,
+             ddof=0) is the conventional choice for a "mean ± std" band over a
+             small sample of CV folds — it does not understate the spread.
         cohort: Cohort label — "hris_only" or "hybrid".
         outer_splits: Number of outer (evaluation) folds.
         inner_splits: Number of inner (hyperparameter-selection) folds.
@@ -354,10 +356,12 @@ def nested_cv_auc_pr(
 
     # np.mean / np.std on a list → numpy scalars; float() casts ensure plain Python
     # floats in the dataclass (cleaner repr, no numpy dtype leaking into notebooks).
+    # ddof=1 → sample std (feast T2-SEL-1): the conventional band for a small
+    # sample of CV folds; population std (ddof=0) understates the spread by √(k/(k−1)).
     return NestedCVResult(
         scores=outer_scores,
         mean=float(np.mean(outer_scores)),
-        std=float(np.std(outer_scores)),
+        std=float(np.std(outer_scores, ddof=1)),
         cohort=cohort,
         outer_splits=outer_splits,
         inner_splits=inner_splits,

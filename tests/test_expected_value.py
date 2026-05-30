@@ -162,6 +162,24 @@ def test_ev_accepts_2d_proba(known_confusion):
     assert ev_2d == pytest.approx(ev_1d)
 
 
+def test_ev_decision_rule_is_inclusive_at_threshold():
+    """A probability exactly equal to the threshold is FLAGGED (`>=`, not `>`).
+
+    Story 3.7: mutation testing showed the decision rule `proba >= threshold`
+    → `proba > threshold` survived — no EV test had a probability sitting
+    exactly on the threshold, so the documented inclusivity was unverified.
+
+    Construction: two true exits at proba == 0.5 with threshold 0.5.
+        Inclusive (`>=`): both flagged → tp=2, fp=0 → EV = 0.5·100·2 − 10·2 = 80
+        Exclusive (`>`) : neither flagged → tp=0 → EV = 0
+    Asserting EV == 80 kills the `>=` → `>` mutant.
+    """
+    y = np.array([1, 1, 0], dtype=int)
+    p = np.array([0.5, 0.5, 0.4])  # two exits sit exactly on the threshold
+    ev = ev_at_threshold(y, p, 0.5, p_eff=0.5, replacement_cost=100.0, intervention_cost=10.0)
+    assert ev == pytest.approx(80.0)
+
+
 # ------------------------------------------------------------------ #
 # breakeven_p_eff — closed form & boundary cases                       #
 # ------------------------------------------------------------------ #
@@ -404,3 +422,29 @@ def test_plot_handles_infinite_breakeven():
     fig = expected_value_plot(sweep, breakeven=be)
     assert isinstance(fig, matplotlib.figure.Figure)
     plt.close(fig)
+
+
+def test_plot_handles_above_range_finite_breakeven(known_confusion):
+    """A FINITE breakeven above the plotted range hits the `f"{breakeven:.2f}"`
+    annotation branch (feast T2-EV-1) — previously only the ∞ side was tested.
+    """
+    import matplotlib.pyplot as plt
+
+    y, p = known_confusion
+    sweep = p_eff_sensitivity_sweep(y, p, 0.5, replacement_cost=100.0, intervention_cost=10.0)
+    fig = expected_value_plot(sweep, breakeven=1.5)  # 1.5 > hi (0.9), finite
+    ax = fig.axes[0]
+    texts = " ".join(t.get_text() for t in ax.texts)
+    assert "1.50" in texts and "above plotted range" in texts
+    plt.close(fig)
+
+
+def test_plot_rejects_malformed_sweep():
+    """An empty or wrong-shaped sweep raises a clear error, not an opaque one
+    (feast T2-EV-1)."""
+    import pandas as pd
+
+    with pytest.raises(ValueError, match="non-empty DataFrame"):
+        expected_value_plot(pd.DataFrame(columns=["p_eff", "expected_value"]))
+    with pytest.raises(ValueError, match="non-empty DataFrame"):
+        expected_value_plot(pd.DataFrame({"wrong": [1, 2]}))

@@ -171,6 +171,56 @@ def test_precision_at_k_invalid_k_raises() -> None:
         precision_at_k(y_true, y_proba, k=1.5)
 
 
+def test_precision_at_k_accepts_2d_proba() -> None:
+    """predict_proba returns (n, 2); precision_at_k must use column 1.
+
+    Story 3.7: mutation testing showed the `proba.ndim == 2` branch and the
+    `[:, 1]` column extract were untested for precision_at_k (mutants `== 3`
+    and `[:, 2]` survived). predict_proba ALWAYS returns (n, 2) in production,
+    so this path is the real one.
+    """
+    y = np.array([1, 1, 0, 0, 1, 0])
+    p_1d = np.array([0.9, 0.8, 0.3, 0.2, 0.7, 0.1])
+    p_2d = np.column_stack([1 - p_1d, p_1d])
+    assert precision_at_k(y, p_1d, k=0.50) == pytest.approx(precision_at_k(y, p_2d, k=0.50))
+
+
+def test_recall_at_k_accepts_2d_proba() -> None:
+    """recall_at_k must also reduce a (n, 2) predict_proba to column 1."""
+    y = np.array([1, 1, 0, 0, 1, 0])
+    p_1d = np.array([0.9, 0.8, 0.3, 0.2, 0.7, 0.1])
+    p_2d = np.column_stack([1 - p_1d, p_1d])
+    assert recall_at_k(y, p_1d, k=0.50) == pytest.approx(recall_at_k(y, p_2d, k=0.50))
+
+
+def test_recall_at_k_invalid_k_raises() -> None:
+    """recall_at_k validates k ∈ (0, 1] — Story 3.7 found this guard untested.
+
+    Kills the `0 < k` → `0 <= k` and `k <= 1` → `k <= 2` mutants that survived
+    because recall_at_k (unlike precision_at_k) had no invalid-k test.
+    """
+    y = np.array([1, 0])
+    p = np.array([0.8, 0.2])
+    with pytest.raises(ValueError, match="k must be in"):
+        recall_at_k(y, p, k=0.0)
+    with pytest.raises(ValueError, match="k must be in"):
+        recall_at_k(y, p, k=1.5)
+
+
+def test_precision_at_k_floor_selects_at_least_one() -> None:
+    """`max(1, ceil(n·k))` guarantees ≥ 1 flagged even when n·k rounds below 1.
+
+    Story 3.7: kills the `max(1, …)` → `max(2, …)` and `n·k` → `n/k` mutants.
+    With n=10, k=0.05 → ceil(0.5)=1 → exactly one row flagged (the top-ranked).
+    The single highest-proba row here is a true exit, so precision = 1.0; a
+    `max(2, …)` mutant would flag two and drop precision to 0.5.
+    """
+    y = np.array([1, 0, 0, 0, 0, 0, 0, 0, 0, 1])
+    p = np.array([0.99, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0.10])
+    # top-1 (proba 0.99) is index 0, a true exit → precision@(k=0.05) = 1/1 = 1.0
+    assert precision_at_k(y, p, k=0.05) == pytest.approx(1.0)
+
+
 # ------------------------------------------------------------------ #
 # recall_at_k() — Story 2.5                                            #
 # ------------------------------------------------------------------ #
@@ -197,6 +247,36 @@ def test_recall_at_k_in_unit_interval() -> None:
     for k in [0.10, 0.20, 0.50]:
         result = recall_at_k(y_true, y_proba, k=k)
         assert 0.0 <= result <= 1.0
+
+
+def test_recall_at_k_n_top_count_is_exact() -> None:
+    """recall_at_k flags exactly max(1, ceil(n·k)) rows — Story 3.7.
+
+    Kills recall_at_k's `max(1, …)` → `max(2, …)` (#486) and `n·k` → `n/k`
+    (#487), which survived because recall had no known-output count test.
+
+    Two positives sit at the very top. k=0.05, n=10 → n_top = ceil(0.5) = 1,
+    so only the single highest-proba positive is captured → recall = 1/2 = 0.5.
+      `max(2, …)` flags 2 → captures both positives → recall 1.0 ≠ 0.5
+      `n/k` = 200    → flags all 10 → captures both       → recall 1.0 ≠ 0.5
+    """
+    y = np.array([1, 1, 0, 0, 0, 0, 0, 0, 0, 0])
+    p = np.array([0.99, 0.98, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0.10])
+    assert recall_at_k(y, p, k=0.05) == pytest.approx(0.5)
+
+
+def test_recall_at_k_2d_proba_known_value() -> None:
+    """recall_at_k reduces (n, 2) predict_proba to column 1 — Story 3.7.
+
+    Kills recall_at_k's `proba.ndim == 2` → `== 3` (#496): with the mutant a
+    2-D array is never reduced, so `argsort` runs on the wrong axis and the
+    captured count diverges from the known answer. Top-2 (k=0.5) are the two
+    positives → recall = 2/2 = 1.0.
+    """
+    y = np.array([1, 1, 0, 0])
+    p_1d = np.array([0.9, 0.8, 0.2, 0.1])
+    p_2d = np.column_stack([1 - p_1d, p_1d])
+    assert recall_at_k(y, p_2d, k=0.5) == pytest.approx(1.0)
 
 
 # ------------------------------------------------------------------ #
@@ -226,3 +306,49 @@ def test_brier_score_accepts_2d_proba() -> None:
     assert brier_score(y_true, y_proba_1d) == pytest.approx(
         brier_score(y_true, y_proba_2d), abs=1e-9
     )
+
+
+# ------------------------------------------------------------------ #
+# Shared proba-validation contract — feast T2-1 / T2-2 / T2-EV-2       #
+# ------------------------------------------------------------------ #
+
+
+class TestSharedProbaValidation:
+    """Every metric routes proba through ``_validation.extract_positive_proba``.
+
+    Before the consolidation, ``precision_at_k``/``recall_at_k`` did NOT reject
+    NaN — ``np.argsort`` sorts NaN to the end, so the descending reversal placed
+    a NaN-scored employee at the TOP of the risk ranking (silent wrong answer).
+    These tests lock the now-uniform contract: non-finite, empty, and wrong-2-D
+    inputs are rejected identically across the package.
+    """
+
+    def test_precision_rejects_nan_proba(self) -> None:
+        """The NaN-hijack path is closed: a NaN probability now raises."""
+        with pytest.raises(ValueError, match="non-finite"):
+            precision_at_k(np.array([1, 0, 1]), np.array([0.5, np.nan, 0.3]))
+
+    def test_recall_rejects_nan_proba(self) -> None:
+        with pytest.raises(ValueError, match="non-finite"):
+            recall_at_k(np.array([1, 0, 1]), np.array([0.5, np.nan, 0.3]))
+
+    def test_auc_pr_rejects_inf_proba(self) -> None:
+        """auc_pr's old `np.isnan` guard missed Inf; the shared `isfinite` catches it."""
+        with pytest.raises(ValueError, match="non-finite"):
+            auc_pr(np.array([1, 0, 1]), np.array([0.5, np.inf, 0.3]))
+
+    def test_auc_roc_rejects_nan_proba(self) -> None:
+        """auc_roc previously had no validation at all."""
+        with pytest.raises(ValueError, match="non-finite"):
+            auc_roc(np.array([1, 0, 1]), np.array([0.5, np.nan, 0.3]))
+
+    def test_auc_roc_rejects_wrong_2d_shape(self) -> None:
+        with pytest.raises(ValueError, match="2 columns"):
+            auc_roc(np.array([1, 0, 1]), np.ones((3, 3)) / 3)
+
+    def test_metrics_reject_empty_proba(self) -> None:
+        """Empty input is now a uniform error (was NaN for precision, 0.0 for recall)."""
+        empty = np.array([])
+        for fn in (auc_pr, auc_roc, brier_score, precision_at_k, recall_at_k):
+            with pytest.raises(ValueError, match="empty"):
+                fn(empty, empty)

@@ -24,6 +24,8 @@ from typing import TYPE_CHECKING
 
 from sklearn.metrics import average_precision_score, brier_score_loss, roc_auc_score
 
+from retention.evaluation._validation import extract_positive_proba
+
 if TYPE_CHECKING:
     import numpy as np
     import pandas as pd
@@ -51,21 +53,10 @@ def auc_pr(
         equal to the class prevalence. 1.0 = perfect ranking.
 
     Raises:
-        ValueError: if y_proba contains NaNs or is the wrong shape.
+        ValueError: if y_proba is non-finite (NaN/Inf), empty, or a 2-D array
+            whose width is not exactly 2 (see ``_validation``).
     """
-    import numpy as np  # noqa: PLC0415
-
-    proba = np.asarray(y_proba)
-    if proba.ndim == 2:
-        if proba.shape[1] != 2:
-            raise ValueError(
-                f"y_proba with 2D shape must have exactly 2 columns; got shape {proba.shape}."
-            )
-        proba = proba[:, 1]
-
-    if np.isnan(proba).any():
-        raise ValueError("y_proba contains NaN values. Check model output.")
-
+    proba = extract_positive_proba(y_proba)
     return float(average_precision_score(y_true, proba))
 
 
@@ -87,12 +78,12 @@ def auc_roc(
 
     Returns:
         Float in [0.5, 1.0] for a useful model. 0.5 = random, 1.0 = perfect.
-    """
-    import numpy as np  # noqa: PLC0415
 
-    proba = np.asarray(y_proba)
-    if proba.ndim == 2:
-        proba = proba[:, 1]
+    Raises:
+        ValueError: if y_proba is non-finite (NaN/Inf), empty, or a 2-D array
+            whose width is not exactly 2 (see ``_validation``).
+    """
+    proba = extract_positive_proba(y_proba)
     return float(roc_auc_score(y_true, proba))
 
 
@@ -118,17 +109,15 @@ def precision_at_k(
         positives; 1.0 = all flagged employees actually exit.
 
     Raises:
-        ValueError: if k is not in (0, 1].
+        ValueError: if k is not in (0, 1], or if y_proba is non-finite (NaN/Inf),
+            empty, or a 2-D array whose width is not exactly 2 (see ``_validation``).
     """
     import numpy as np  # noqa: PLC0415
 
     if not 0 < k <= 1:
         raise ValueError(f"k must be in (0, 1], got {k}.")
 
-    proba = np.asarray(y_proba)
-    if proba.ndim == 2:
-        proba = proba[:, 1]
-
+    proba = extract_positive_proba(y_proba)
     y_arr = np.asarray(y_true)
     n = len(proba)
     n_top = max(1, int(np.ceil(n * k)))
@@ -159,16 +148,17 @@ def recall_at_k(
         Recall in the top-k bucket. 0.0 = no real exits flagged; 1.0 = all
         real exits captured in the top-k slice. Returns 0.0 if no positives
         in y_true (degenerate label set).
+
+    Raises:
+        ValueError: if k is not in (0, 1], or if y_proba is non-finite (NaN/Inf),
+            empty, or a 2-D array whose width is not exactly 2 (see ``_validation``).
     """
     import numpy as np  # noqa: PLC0415
 
     if not 0 < k <= 1:
         raise ValueError(f"k must be in (0, 1], got {k}.")
 
-    proba = np.asarray(y_proba)
-    if proba.ndim == 2:
-        proba = proba[:, 1]
-
+    proba = extract_positive_proba(y_proba)
     y_arr = np.asarray(y_true)
     total_positives = y_arr.sum()
     if total_positives == 0:
@@ -204,12 +194,12 @@ def brier_score(
 
     Returns:
         Float in [0, 1]. Lower = better calibration + discrimination.
-    """
-    import numpy as np  # noqa: PLC0415
 
-    proba = np.asarray(y_proba)
-    if proba.ndim == 2:
-        proba = proba[:, 1]
+    Raises:
+        ValueError: if y_proba is non-finite (NaN/Inf), empty, or a 2-D array
+            whose width is not exactly 2 (see ``_validation``).
+    """
+    proba = extract_positive_proba(y_proba)
     return float(brier_score_loss(y_true, proba))
 
 

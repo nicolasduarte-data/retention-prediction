@@ -18,7 +18,7 @@ Design principle (mirrors test_expected_value.py):
 
     Two properties are tested as invariants that hold for all valid inputs:
       - result.mean == np.mean(result.scores)  — mean is computed from scores
-      - result.std  == np.std(result.scores)   — std is computed from scores
+      - result.std  == np.std(result.scores, ddof=1)  — sample std from scores
     These are the properties a reviewer would verify by hand to trust the
     headline number.
 """
@@ -28,11 +28,13 @@ from __future__ import annotations
 import dataclasses
 
 import numpy as np
+import pandas as pd
 import pytest
 
 from retention.evaluation.nested_cv import (
     PARAM_GRID,
     NestedCVResult,
+    _scale_pos_weight,
     nested_cv_auc_pr,
 )
 from retention.features.cohorts import extract_X_y, split_cohorts
@@ -82,6 +84,56 @@ def nested_result_hris(hris_X_y):
     """Run nested 2×2 CV on the hris_only cohort once."""
     X, y = hris_X_y
     return nested_cv_auc_pr(X, y, "hris_only", outer_splits=2, inner_splits=2)
+
+
+# ------------------------------------------------------------------ #
+# _scale_pos_weight — the class-imbalance weight formula (Story 3.7)    #
+# ------------------------------------------------------------------ #
+#
+# Mutation testing (Story 3.7) showed the entire scale_pos_weight formula was
+# untested for *correctness*: the nested-CV tests only assert scores land in
+# [0, 1], so mutants that broke the weight (n_neg/n_pos → n_neg*n_pos, the ==1
+# count → !=1, the n_pos==0 guard) all survived. A wrong class weight silently
+# changes every GBM fit. These known-value tests pin the formula exactly.
+
+
+def test_scale_pos_weight_known_value() -> None:
+    """spw = n_negative / n_positive. 7 neg / 3 pos → 7/3.
+
+    Kills the n_neg/n_pos → n_neg*n_pos mutant (would give 21) and the
+    ==1 → !=1 count mutants (would miscount positives/negatives).
+    """
+    y = pd.Series([1, 1, 1, 0, 0, 0, 0, 0, 0, 0])  # 3 positives, 7 negatives
+    assert _scale_pos_weight(y) == pytest.approx(7.0 / 3.0)
+
+
+def test_scale_pos_weight_balanced_is_one() -> None:
+    """Equal classes → spw = 1.0 (kills * vs / : 1*1 == 1/1, so pair with above)."""
+    y = pd.Series([1, 1, 0, 0])  # 2 pos, 2 neg
+    assert _scale_pos_weight(y) == pytest.approx(1.0)
+
+
+def test_scale_pos_weight_counts_are_correct() -> None:
+    """A lopsided split pins both counts independently: 1 pos / 9 neg → 9.0.
+
+    Kills the ==0 → ==1 boundary on the guard and the swapped-count mutants:
+    if n_neg counted ==1 instead of ==0 it would be 1, giving 1.0 not 9.0.
+    """
+    y = pd.Series([1, 0, 0, 0, 0, 0, 0, 0, 0, 0])  # 1 pos, 9 neg
+    assert _scale_pos_weight(y) == pytest.approx(9.0)
+
+
+def test_scale_pos_weight_raises_on_no_positives() -> None:
+    """Zero positives → ValueError (cannot divide). Kills the n_pos==0 guard mutant."""
+    y = pd.Series([0, 0, 0, 0])
+    with pytest.raises(ValueError, match="No positive examples"):
+        _scale_pos_weight(y)
+
+
+def test_scale_pos_weight_accepts_boolean_series() -> None:
+    """Boolean target is cast to int first (docstring contract): 2 True / 2 False → 1.0."""
+    y = pd.Series([True, True, False, False])
+    assert _scale_pos_weight(y) == pytest.approx(1.0)
 
 
 # ------------------------------------------------------------------ #
@@ -178,9 +230,9 @@ def test_mean_consistency(nested_result_hybrid):
 
 
 def test_std_consistency(nested_result_hybrid):
-    """result.std must equal np.std(result.scores) to floating-point precision."""
+    """result.std must equal the SAMPLE std (ddof=1) of the scores (T2-SEL-1)."""
     result = nested_result_hybrid
-    assert result.std == pytest.approx(float(np.std(result.scores)))
+    assert result.std == pytest.approx(float(np.std(result.scores, ddof=1)))
 
 
 def test_metadata_fields(nested_result_hybrid):

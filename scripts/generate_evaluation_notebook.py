@@ -102,9 +102,11 @@ from retention.models.threshold import optimize_threshold, threshold_sweep, thre
 from retention.models.tracking import register_champion
 from retention.models.xgb import RetentionModel
 
-# Notebook noise (sklearn/mlflow/xgboost deprecation chatter) hidden so the
-# narrative output stays readable. The library code is fully typed and tested.
-warnings.filterwarnings("ignore")
+# Silence only the library deprecation chatter (sklearn/mlflow/xgboost) so the
+# narrative stays readable — NOT a blanket ignore. A genuine RuntimeWarning
+# (e.g. a numerical issue) must still surface (feast T2-ORCH-2).
+warnings.filterwarnings("ignore", category=DeprecationWarning)
+warnings.filterwarnings("ignore", category=FutureWarning)
 config.configure_plot_style()
 config.set_global_seed()
 
@@ -115,15 +117,24 @@ CRITERION = "f2"  # [FLIP-RISK]: recall weighted 2x precision — a missed exit
 print(f"SEED={config.SEED}  label={LABEL}  operating-point criterion={CRITERION}")"""
     ),
     md(
-        "## 2 — Data & temporal split\n\n"
+        "## 2 — Data & split\n\n"
         "We load from the committed **CSV snapshot** (the reviewer path: no "
-        "BigQuery credentials needed) and split **temporally** — oldest 70 % "
-        "train, next 15 % validation, newest 15 % test. No shuffling: HR data "
-        "trends over time, and a random split would leak the future into the "
-        "past.\n\n"
-        "The snapshot is pinned to `2026-05-28` (the date the methodology's "
-        "documented nested-CV and EV numbers were computed on) so this notebook "
-        "reproduces them, with a fallback to a later snapshot for a fresh clone."
+        "BigQuery credentials needed).\n\n"
+        "**An honesty note about the split.** The current mart is a *single "
+        "cross-section* — every row shares one `snapshot_date` "
+        "(`docs/data_card.md` §3). `temporal_split()` therefore produces a "
+        "**deterministic, leak-free holdout partitioned by `employee_id`** (the "
+        "stable sort's tiebreak), **not** a true temporal split. With one row per "
+        "employee, no employee appears in two splits, so the 70/15/15 holdout is "
+        "a valid *generalisation* estimate — but it does **not** test *temporal* "
+        "generalisation (train on month T, predict T+1). That needs `pa-warehouse` "
+        "to ship time-series snapshots and is deferred. The `temporal_split` "
+        "machinery (sort-by-date + `assert_no_temporal_leak`) is in place and "
+        "arms automatically the day real time-series data lands; on a single "
+        "snapshot it is correct but vacuous — no future to leak.\n\n"
+        "The snapshot is pinned so this notebook reproduces the methodology's "
+        "documented nested-CV and EV numbers, with a fallback to a later snapshot "
+        "for a fresh clone."
     ),
     code(
         r"""# config.DATA_DIR is absolute (resolved from the installed package), so the
@@ -246,22 +257,32 @@ for cohort in ("hris_only", "hybrid"):
 for (model_name, cohort), proba in val_proba.items():
     _, y_val = extract_X_y(val_cohorts[cohort], cohort)
     threshold = optimize_threshold(y_val, proba, CRITERION)
+    # Full precision on purpose: select_champion (§8) RANKS on auc_pr and GATES
+    # on brier, so the selection must see unrounded values. Rounding is a display
+    # concern only (below). Deciding on 3-dp-rounded metrics could flip the
+    # champion between two cells within ~0.0005 of each other, or mis-classify a
+    # cell whose true Brier sits just across the base-rate gate.
     rows.append(
         {
             "model": model_name,
             "cohort": cohort,
-            "auc_pr": round(auc_pr(y_val, proba), 3),
-            "prec_at_10": round(precision_at_k(y_val, proba, k=0.10), 3),
-            "ece": round(expected_calibration_error(y_val, proba), 3),
-            "brier": round(brier_score(y_val, proba), 3),
-            "threshold": round(threshold, 2),
-            "ev_at_default": round(ev_at_threshold(y_val, proba, threshold), 0),
-            "breakeven_p_eff": round(breakeven_p_eff(y_val, proba, threshold), 3),
+            "auc_pr": auc_pr(y_val, proba),
+            "prec_at_10": precision_at_k(y_val, proba, k=0.10),
+            "ece": expected_calibration_error(y_val, proba),
+            "brier": brier_score(y_val, proba),
+            "threshold": threshold,
+            "ev_at_default": ev_at_threshold(y_val, proba, threshold),
+            "breakeven_p_eff": breakeven_p_eff(y_val, proba, threshold),
         }
     )
 
-summary = pd.DataFrame(rows)
-summary"""
+summary = pd.DataFrame(rows)  # full precision — consumed by select_champion in §8
+
+# Display only: round for legibility. The selection in §8 uses `summary` above.
+summary.round(
+    {"auc_pr": 3, "prec_at_10": 3, "ece": 3, "brier": 3,
+     "threshold": 2, "ev_at_default": 0, "breakeven_p_eff": 3}
+)"""
     ),
     md(
         "**Flat vs nested — the optimism gap.** Side by side, the single "

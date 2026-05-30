@@ -163,6 +163,12 @@ class TestLiftAtK:
         result_2d = lift_at_k(y, p_2d, k=0.50)
         assert result_1d == pytest.approx(result_2d, rel=1e-9)
 
+    def test_lift_rejects_nan_proba(self) -> None:
+        """lift_at_k delegates to precision_at_k, so the shared validator closes
+        the NaN-hijack here too (feast T2-1)."""
+        with pytest.raises(ValueError, match="non-finite"):
+            lift_at_k(np.array([1, 0, 1]), np.array([0.5, np.nan, 0.3]), k=0.5)
+
 
 # ------------------------------------------------------------------ #
 # Story 3.2 — expected_calibration_error                               #
@@ -281,6 +287,23 @@ class TestExpectedCalibrationError:
             ece = expected_calibration_error(y, p)
             assert 0.0 <= ece <= 1.0, f"ECE = {ece} out of [0, 1]"
 
+    def test_ece_single_class_returns_finite_not_nan(self) -> None:
+        """A single-class label set yields a FINITE ECE, not NaN (T2-CAL-1).
+
+        The docstring once claimed ECE returns NaN for a degenerate (all-0/all-1)
+        label set; the code never did. This locks the *actual* behavior: with all
+        labels equal, every populated bin's observed rate is 0, so ECE collapses
+        to the weighted mean predicted probability — a finite number.
+        """
+        n = 200
+        rng = np.random.default_rng(11)
+        y = np.zeros(n, dtype=int)  # single class
+        p = rng.uniform(0.0, 1.0, n)
+        ece = expected_calibration_error(y, p, n_bins=10)
+        assert np.isfinite(ece), f"ECE should be finite for a single-class set, got {ece}"
+        # all labels 0 → every bin accuracy is 0 → ECE == weighted mean predicted prob == mean(p)
+        assert ece == pytest.approx(float(p.mean()), abs=1e-9)
+
 
 # ------------------------------------------------------------------ #
 # Story 3.2 — reliability_diagram                                      #
@@ -384,3 +407,228 @@ class TestReliabilityDiagram:
             fig = reliability_diagram(y, p, n_bins=n_bins)
             assert isinstance(fig, matplotlib.figure.Figure)
             plt.close(fig)
+
+
+# ------------------------------------------------------------------ #
+# Story 3.7 — mutation-targeted ECE precision tests                    #
+# ------------------------------------------------------------------ #
+
+
+class TestECEBinLevelPrecision:
+    """Analytically exact ECE tests targeting bin-edge and accumulation mutants.
+
+    Story 3.7 (mutation testing) revealed 7 surviving mutants in the ECE
+    binning logic that the existing threshold-based tests could not kill:
+
+        Mutant 34  — ``ece =`` instead of ``ece +=`` (only last bin counted)
+        Mutants 14, 15, 19, 20 — wrong linspace args / empty thresholds
+        Mutant 16  — ``n_bins - 1`` linspace (coarser bins split one correct bin)
+        Mutant 17  — ``n_bins + 2`` linspace (finer bins split one correct bin)
+
+    Why threshold-based tests fail:
+        ``assert ece < 0.05`` passes even when bin edges are wrong, as long as
+        the predictions happen to fall in the same relative bins.  Exact-value
+        assertions on constructed inputs force a failure whenever any step of
+        the ECE formula (binning, accumulation) deviates.
+
+    Construction principle:
+        All predictions within a group are identical (same float) so that
+        ``proba[mask].mean()`` is exact regardless of which bin the group lands
+        in.  Labels are 0 or 1 exclusively so ``y_arr[mask].mean()`` is an
+        exact integer ratio.
+    """
+
+    def test_ece_two_adjacent_bins_exact_value(self) -> None:
+        """ECE sums contributions from bin 0 and bin 1 — exact accumulation.
+
+        Construction:
+            Group A — 100 samples, p=0.05 (bin 0: [0.0, 0.1)), all positive.
+                conf=0.05, acc=1.0, error=0.95, weight=0.5 → contrib=0.475
+            Group B — 100 samples, p=0.15 (bin 1: [0.1, 0.2)), all negative.
+                conf=0.15, acc=0.0, error=0.15, weight=0.5 → contrib=0.075
+            Expected ECE = 0.475 + 0.075 = 0.550
+
+        Killed mutants:
+            #34 (ece= not ece+=): only Group B retained → ECE=0.075 ≠ 0.550.
+            #14, #20 (all in bin 0): A+B merged, conf=0.10, acc=0.50
+                → ECE=|0.10−0.50|=0.40 ≠ 0.550.
+            #15, #19 (first threshold at 0.2): A (0.05) and B (0.15) both
+                land below 0.2 → merged → ECE=0.40 ≠ 0.550.
+        """
+        p = np.concatenate([np.full(100, 0.05), np.full(100, 0.15)])
+        y = np.concatenate([np.ones(100, dtype=int), np.zeros(100, dtype=int)])
+        ece = expected_calibration_error(y, p, n_bins=10)
+        assert ece == pytest.approx(0.55, abs=1e-10), (
+            f"ECE = {ece:.8f}; expected exactly 0.55000000 (bin 0 + bin 1 exact accumulation)."
+        )
+
+    def test_ece_coarse_linspace_merges_two_predictions(self) -> None:
+        """Correct bin edges keep p=0.12 and p=0.13 together in bin 1.
+
+        Construction:
+            Both groups land in bin 1 ([0.1, 0.2)) under correct equal-width
+            binning — they are merged into a single calibration bin.
+                Group A: p=0.12 (100 samples), y=0 → acc=0.0
+                Group B: p=0.13 (100 samples), y=1 → acc=1.0
+            Merged: conf=0.125, acc=0.5, error=0.375, weight=1.0
+            Expected ECE = 0.375
+
+        Killed mutant:
+            #16 (linspace n_bins−1=9 pts → thresholds [0.125, 0.25, ...]):
+                A (0.12) < 0.125 → bin 0; B (0.13) ≥ 0.125 → bin 1. Separate:
+                    bin 0 contrib = 0.5 × |0.12−0.0| = 0.060
+                    bin 1 contrib = 0.5 × |0.13−1.0| = 0.435
+                    ECE = 0.495 ≠ 0.375. ✗ Killed.
+        """
+        p = np.concatenate([np.full(100, 0.12), np.full(100, 0.13)])
+        y = np.concatenate([np.zeros(100, dtype=int), np.ones(100, dtype=int)])
+        ece = expected_calibration_error(y, p, n_bins=10)
+        assert ece == pytest.approx(0.375, abs=1e-10), (
+            f"ECE = {ece:.8f}; expected exactly 0.37500000 "
+            "(p=0.12 and p=0.13 correctly merged into bin 1)."
+        )
+
+    def test_ece_fine_linspace_keeps_two_predictions_merged(self) -> None:
+        """Correct bin edges keep p=0.050 and p=0.095 together in bin 0.
+
+        Construction:
+            Both groups land in bin 0 ([0.0, 0.1)) under correct equal-width
+            binning — they are merged.
+                Group A: p=0.050 (100 samples), y=1 → acc=1.0
+                Group B: p=0.095 (100 samples), y=0 → acc=0.0
+            Merged: conf=0.0725, acc=0.5, error=0.4275, weight=1.0
+            Expected ECE = 0.4275
+
+        Killed mutant:
+            #17 (linspace n_bins+2=12 pts → first threshold ≈ 0.0909):
+                A (0.050) < 0.0909 → bin 0; B (0.095) ≥ 0.0909 → bin 1. Separate:
+                    bin 0 contrib = 0.5 × |0.050−1.0| = 0.475
+                    bin 1 contrib = 0.5 × |0.095−0.0| = 0.0475
+                    ECE = 0.5225 ≠ 0.4275. ✗ Killed.
+        """
+        p = np.concatenate([np.full(100, 0.050), np.full(100, 0.095)])
+        y = np.concatenate([np.ones(100, dtype=int), np.zeros(100, dtype=int)])
+        ece = expected_calibration_error(y, p, n_bins=10)
+        assert ece == pytest.approx(0.4275, abs=1e-10), (
+            f"ECE = {ece:.8f}; expected exactly 0.42750000 "
+            "(p=0.050 and p=0.095 correctly merged into bin 0)."
+        )
+
+
+# ------------------------------------------------------------------ #
+# Story 3.7 — mutation-targeted reliability_diagram structural tests   #
+# ------------------------------------------------------------------ #
+
+
+class TestReliabilityDiagramStructural:
+    """Bar-count tests targeting reliability_diagram binning mutants.
+
+    Story 3.7 found 6 surviving mutants in reliability_diagram binning:
+
+        Mutant 60  — ``bin_ids != k`` (inverted mask: filled bins look empty,
+                      empty bins look full)
+        Mutants 50, 51 — wrong linspace point count (finer/coarser edges split
+                          predictions that belong in one bin)
+        Mutants 53, 54 — wrong threshold slice (first threshold missing → bin 0
+                          and bin 1 merge; empty threshold array → all in bin 0)
+        Mutant 55  — ``bin_edges[1:-2]`` drops the last threshold (0.9), merging
+                      bins 8 and 9
+
+    Why count patches?
+        Each ``axes.bar(x, y, ...)`` call adds exactly 1 Rectangle to
+        ``ax.patches``.  The perfect-calibration diagonal is a Line2D — not
+        a patch.  So ``len(ax.patches)`` == number of non-empty bins drawn.
+        Binning mutations change which predictions group together, directly
+        changing the bar count for carefully constructed inputs.
+    """
+
+    def test_bar_count_single_bin(self) -> None:
+        """All predictions in one bin → exactly 1 bar.
+
+        Mutant 60 inverts the mask (``bin_ids != k``): the bin holding all
+        predictions appears empty (``continue``-d), every other bin appears full.
+        9 bars are drawn instead of 1.
+        """
+        import matplotlib.pyplot as plt  # noqa: PLC0415
+
+        p = np.full(100, 0.15)  # all in bin 1 ([0.1, 0.2))
+        y = np.concatenate([np.ones(30, dtype=int), np.zeros(70, dtype=int)])
+
+        fig = reliability_diagram(y, p, n_bins=10)
+        ax = fig.axes[0]
+        n_bars = len(ax.patches)
+        plt.close(fig)
+
+        assert n_bars == 1, (
+            f"Expected 1 bar (all predictions in bin 1), got {n_bars}. "
+            "n_bars > 1 suggests the bin mask is inverted (bin_ids != k)."
+        )
+
+    def test_bar_count_two_adjacent_outer_bins(self) -> None:
+        """Predictions in bin 0 and bin 1 → exactly 2 bars.
+
+        Mutants 53 (thresholds start at 0.2) and 54 (empty thresholds) cause
+        p=0.05 and p=0.15 to land in the same bin → 1 bar instead of 2.
+        """
+        import matplotlib.pyplot as plt  # noqa: PLC0415
+
+        # p=0.05 → bin 0 ([0.0, 0.1)); p=0.15 → bin 1 ([0.1, 0.2))
+        p = np.concatenate([np.full(50, 0.05), np.full(50, 0.15)])
+        y = np.concatenate([np.ones(50, dtype=int), np.zeros(50, dtype=int)])
+
+        fig = reliability_diagram(y, p, n_bins=10)
+        ax = fig.axes[0]
+        n_bars = len(ax.patches)
+        plt.close(fig)
+
+        assert n_bars == 2, (
+            f"Expected 2 bars (bin 0 at p≈0.05 and bin 1 at p≈0.15), got {n_bars}. "
+            "n_bars == 1 suggests the first threshold (0.1) is missing or ≥ 0.2."
+        )
+
+    def test_bar_count_same_correct_bin_no_split(self) -> None:
+        """Two predictions in the same correct bin → exactly 1 bar.
+
+        Mutant 50 (n_bins−1 pts → threshold at 0.125): p=0.115 < 0.125 → bin 0;
+            p=0.19 ≥ 0.125 → bin 1. Split → 2 bars.
+        Mutant 51 (n_bins+2 pts → threshold at ≈0.1818): p=0.115 → bin 1;
+            p=0.19 ≥ 0.1818 → bin 2. Split → 2 bars.
+        Correct code: both in bin 1 ([0.1, 0.2)) → merged → 1 bar.
+        """
+        import matplotlib.pyplot as plt  # noqa: PLC0415
+
+        # Both in correct bin 1 ([0.1, 0.2)); mutants 50 and 51 split them
+        p = np.concatenate([np.full(50, 0.115), np.full(50, 0.19)])
+        y = np.concatenate([np.zeros(50, dtype=int), np.ones(50, dtype=int)])
+
+        fig = reliability_diagram(y, p, n_bins=10)
+        ax = fig.axes[0]
+        n_bars = len(ax.patches)
+        plt.close(fig)
+
+        assert n_bars == 1, (
+            f"Expected 1 bar (p=0.115 and p=0.19 both in correct bin 1), got {n_bars}. "
+            "n_bars == 2 suggests a wrong linspace point count split the bin."
+        )
+
+    def test_bar_count_high_end_bins_not_merged(self) -> None:
+        """Predictions in bins 8 and 9 → exactly 2 bars.
+
+        Mutant 55 uses ``bin_edges[1:-2]``, dropping the last threshold (0.9).
+        p=0.85 and p=0.95 land in the same final mutant bin (≥ 0.8) → 1 bar.
+        Correct: bin 8 [0.8, 0.9) and bin 9 [0.9, 1.0] → 2 separate bars.
+        """
+        import matplotlib.pyplot as plt  # noqa: PLC0415
+
+        p = np.concatenate([np.full(50, 0.85), np.full(50, 0.95)])
+        y = np.concatenate([np.zeros(50, dtype=int), np.ones(50, dtype=int)])
+
+        fig = reliability_diagram(y, p, n_bins=10)
+        ax = fig.axes[0]
+        n_bars = len(ax.patches)
+        plt.close(fig)
+
+        assert n_bars == 2, (
+            f"Expected 2 bars (bin 8 at p≈0.85 and bin 9 at p≈0.95), got {n_bars}. "
+            "n_bars == 1 suggests the last threshold (0.9) was dropped."
+        )
