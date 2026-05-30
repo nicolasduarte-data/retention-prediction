@@ -42,6 +42,7 @@ from pathlib import Path
 from typing import Generator
 
 import mlflow
+import mlflow.exceptions
 import mlflow.tracking
 import numpy as np
 import pytest
@@ -482,3 +483,27 @@ def test_register_champion_second_call_increments_version(isolated_store: Path) 
         pip_requirements=["scikit-learn"],
     )
     assert (v1, v2) == (1, 2)
+
+
+def test_register_champion_raises_actionable_error_on_registry_failure(
+    isolated_store: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """If registration fails AFTER the model is logged, register_champion raises
+    an actionable RuntimeError — not a bare MlflowException (feast T2-SEL-3).
+
+    The model is logged inside the run (which closes first); only the
+    register/promote step is made to fail. The raised error must name the run
+    and the intact model URI so the operator re-runs registration, not training.
+    """
+
+    def _boom(*_args: object, **_kwargs: object) -> object:
+        raise mlflow.exceptions.MlflowException("simulated registry write failure")
+
+    monkeypatch.setattr("mlflow.register_model", _boom)
+
+    with pytest.raises(RuntimeError, match="re-run register_champion"):
+        register_champion(
+            _tiny_fitted_model(),
+            experiment_name=_unique_experiment(),
+            pip_requirements=["scikit-learn"],
+        )
